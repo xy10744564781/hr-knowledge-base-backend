@@ -240,8 +240,8 @@ async def export_session(
         
         logger.info(f"Markdown 内容生成成功，长度: {len(markdown_content)}")
         
-        # 生成文件名（URL 编码中文）
-        filename = f"chat_{session['title']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        # 生成文件名（使用对话名称）
+        filename = f"{session['title']}.md"
         encoded_filename = quote(filename)
         
         logger.info(f"准备返回文件: {filename}")

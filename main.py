@@ -33,6 +33,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],  # 暴露 Content-Disposition header 给前端
 )
 
 # 创建必要的目录
