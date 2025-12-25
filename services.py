@@ -737,8 +737,11 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
         
         # 使用流式生成
         full_answer = ""
+        chunk_count = 0
         async for chunk in _generate_streaming_response(vector_results, processed_query, user_ctx_dict):
             full_answer += chunk
+            chunk_count += 1
+            logger.info(f"[Stream] Chunk #{chunk_count}, length: {len(chunk)}, total: {len(full_answer)}")
             yield {
                 'type': 'content',
                 'content': chunk,
@@ -773,7 +776,7 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
         }
 
 async def _generate_streaming_response(vector_results: List, query: str, user_ctx: Dict) -> AsyncGenerator[str, None]:
-    """生成流式LLM响应"""
+    """生成流式LLM响应 - 使用真正的流式API"""
     try:
         agent = get_hr_agent()
         if not agent.llm:
@@ -786,96 +789,19 @@ async def _generate_streaming_response(vector_results: List, query: str, user_ct
         # 构建提示词
         prompt = agent._build_enhanced_prompt(query, context_docs, user_ctx)
         
-        # 使用Ollama的流式API
+        # 使用 Ollama 的真正流式 API
         try:
-            # 这里需要使用支持流式的LLM调用
-            # 由于langchain_ollama可能不直接支持流式，我们需要模拟
-            response = agent.llm.invoke(prompt)
+            logger.info("开始使用流式API生成回答...")
             
-            if response and response.content:
-                # 解析思考过程和正式回答
-                content = response.content.strip()
-                
-                # 检测是否包含思考过程（通常以特定模式开始）
-                thinking_patterns = [
-                    "好的，我现在需要",
-                    "首先，用户提供的",
-                    "根据用户提供的文档",
-                    "我需要仔细理解",
-                    "用户的问题可能涉及"
-                ]
-                
-                thinking_content = ""
-                formal_answer = ""
-                
-                # 查找思考过程的结束标志
-                thinking_end_patterns = [
-                    "【问题理解】",
-                    "## 问题理解",
-                    "# 问题理解",
-                    "问题理解："
-                ]
-                
-                has_thinking = any(pattern in content for pattern in thinking_patterns)
-                
-                if has_thinking:
-                    # 寻找思考过程的结束位置
-                    thinking_end_pos = -1
-                    for pattern in thinking_end_patterns:
-                        pos = content.find(pattern)
-                        if pos != -1:
-                            thinking_end_pos = pos
-                            break
+            # 使用 astream 进行异步流式生成
+            async for chunk in agent.llm.astream(prompt):
+                if chunk.content:
+                    # 直接输出每个 chunk，实现真正的流式效果
+                    yield chunk.content
                     
-                    if thinking_end_pos != -1:
-                        thinking_content = content[:thinking_end_pos].strip()
-                        formal_answer = content[thinking_end_pos:].strip()
-                    else:
-                        # 如果没找到结束标志，尝试按段落分割
-                        paragraphs = content.split('\n\n')
-                        if len(paragraphs) > 1:
-                            # 第一段作为思考过程
-                            thinking_content = paragraphs[0]
-                            formal_answer = '\n\n'.join(paragraphs[1:])
-                        else:
-                            formal_answer = content
-                else:
-                    formal_answer = content
-                
-                # 先发送思考过程（如果有）
-                if thinking_content:
-                    yield f"<thinking>{thinking_content}</thinking>"
-                    await asyncio.sleep(0.1)
-                
-                # 流式输出正式回答
-                if formal_answer:
-                    sentences = []
-                    current_sentence = ""
-                    
-                    for char in formal_answer:
-                        current_sentence += char
-                        if char in ['。', '！', '？', '\n', '；', '：']:
-                            if current_sentence.strip():
-                                sentences.append(current_sentence)
-                                current_sentence = ""
-                    
-                    # 添加剩余内容
-                    if current_sentence.strip():
-                        sentences.append(current_sentence)
-                    
-                    # 流式输出句子
-                    for sentence in sentences:
-                        yield sentence
-                        # 添加小延迟模拟真实流式效果
-                        await asyncio.sleep(0.1)
-                else:
-                    yield "抱歉，无法生成完整回答，请稍后再试。"
-            else:
-                yield "抱歉，无法生成回答，请稍后再试。"
-                
         except Exception as e:
             logger.error(f"LLM流式生成失败: {str(e)}")
-            yield f"生成回答时出现问题: {str(e)}"
+            yield f"\n\n抱歉，生成回答时出现问题: {str(e)}"
             
     except Exception as e:
         logger.error(f"流式响应生成失败: {str(e)}")
