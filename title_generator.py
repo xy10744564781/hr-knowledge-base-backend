@@ -1,9 +1,9 @@
 """
 聊天会话标题生成服务
-使用本地 LLM 根据用户第一条消息生成简短标题
+使用阿里云API根据用户第一条消息生成简短标题
 """
-from langchain_ollama import ChatOllama
-from config import OLLAMA_MODEL, OLLAMA_BASE_URL
+from langchain_openai import ChatOpenAI
+from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, LLM_MODEL
 from logging_setup import logger
 
 
@@ -29,12 +29,13 @@ def generate_session_title(first_message: str) -> str:
 
 标题："""
 
-        # 创建 LLM 实例（使用简单配置）
-        llm = ChatOllama(
-            model=OLLAMA_MODEL,
-            base_url=OLLAMA_BASE_URL,
+        # 创建 LLM 实例（使用阿里云API）
+        llm = ChatOpenAI(
+            model=LLM_MODEL,
+            openai_api_key=DASHSCOPE_API_KEY,
+            openai_api_base=DASHSCOPE_BASE_URL,
             temperature=0.3,
-            num_predict=50,  # 限制生成长度
+            max_tokens=50,  # 限制生成长度
         )
         
         # 生成标题
