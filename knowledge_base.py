@@ -83,28 +83,46 @@ class VectorManager:
             raise Exception("向量存储未初始化")
         
         try:
-            # 使用智能文档切割器
-            from document_splitter import create_hr_splitter
             from langchain.schema import Document
             
-            # 创建Document对象
-            documents = []
+            # 确保texts是字符串列表
+            if not isinstance(texts, list):
+                texts = [texts]
+            
+            # 确保metadatas是字典列表
+            if not isinstance(metadatas, list):
+                metadatas = [metadatas]
+            
+            # 过滤空文本
+            valid_texts = []
+            valid_metadatas = []
             for i, text in enumerate(texts):
-                metadata = metadatas[i] if i < len(metadatas) else {}
-                documents.append(Document(page_content=text, metadata=metadata))
+                if text and isinstance(text, str) and text.strip():
+                    valid_texts.append(text.strip())
+                    valid_metadatas.append(metadatas[i] if i < len(metadatas) else {})
+            
+            if not valid_texts:
+                logger.warning("没有有效的文本内容可添加")
+                return False
+            
+            logger.info(f"准备添加 {len(valid_texts)} 个有效文本块")
             
             # 生成IDs
             if ids is None:
                 if document_id:
-                    ids = [f"{document_id}_chunk_{i}" for i in range(len(documents))]
+                    ids = [f"{document_id}_chunk_{i}" for i in range(len(valid_texts))]
                 else:
                     import uuid
                     base_id = str(uuid.uuid4())
-                    ids = [f"{base_id}_chunk_{i}" for i in range(len(documents))]
+                    ids = [f"{base_id}_chunk_{i}" for i in range(len(valid_texts))]
             
-            # 添加到向量存储
-            self.vector_store.add_documents(documents, ids=ids)
-            logger.info(f"成功添加 {len(documents)} 个文档到向量存储")
+            # 使用add_texts方法（更稳定）
+            self.vector_store.add_texts(
+                texts=valid_texts,
+                metadatas=valid_metadatas,
+                ids=ids
+            )
+            logger.info(f"成功添加 {len(valid_texts)} 个文档到向量存储")
             return True
             
         except Exception as e:
@@ -401,8 +419,17 @@ def process_upload_file(file: UploadFile) -> List[str]:
             from document_splitter import create_hr_splitter
             
             splitter = create_hr_splitter()
+            
+            # 记录原始文档内容长度
+            for i, doc in enumerate(documents):
+                logger.info(f"原始文档 {i+1} 内容长度: {len(doc.page_content)} 字符")
+            
             split_docs = splitter.split_documents(documents)
             logger.info(f"文档分割完成，分块数: {len(split_docs)}")
+            
+            # 记录每个分块的长度
+            for i, doc in enumerate(split_docs[:5]):  # 只记录前5个
+                logger.info(f"分块 {i+1} 长度: {len(doc.page_content)} 字符")
             
             # 7. 提取文本内容
             valid_chunks = []
