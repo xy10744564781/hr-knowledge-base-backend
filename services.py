@@ -286,13 +286,25 @@ def _generate_query_suggestions(query: str) -> list:
 def _build_response_data(answer: str, vector_results: list, query_analysis: dict, 
                         original_query: str, processed_query: str, start_time: float,
                         evaluation: dict = None) -> QueryResponse:
-    """构建优化的响应数据"""
+    """构建优化的响应数据，包含明确的来源标识"""
+    strategy = query_analysis.get('strategy', 'unknown')
+    
+    # 确定信息来源类型
+    if strategy == 'document_based' and vector_results:
+        source_type = "company_documents"  # 公司上传的文档
+        source_description = "已上传的公司文档"
+    else:
+        source_type = "general_knowledge"  # AI通用知识
+        source_description = "AI通用知识（非公司文档）"
+    
     # 构建详细的来源数据
     source_data = [{
         "tool": "hr_knowledge_search",
+        "source_type": source_type,  # 新增：明确的来源类型
+        "source_description": source_description,  # 新增：来源描述
         "original_query": original_query,
         "processed_query": processed_query,
-        "strategy": query_analysis.get('strategy', 'unknown'),
+        "strategy": strategy,
         "evaluation": evaluation or {},
         "search_results": [
             {
@@ -303,7 +315,12 @@ def _build_response_data(answer: str, vector_results: list, query_analysis: dict
                 "title": doc.metadata.get('title', '') if hasattr(doc, 'metadata') else ''
             } for doc in vector_results
         ],
-        "result_count": len(vector_results)
+        "result_count": len(vector_results),
+        "document_titles": list(set([
+            doc.metadata.get('title', '') 
+            for doc in vector_results 
+            if hasattr(doc, 'metadata') and doc.metadata.get('title')
+        ]))  # 新增：参考的文档标题列表
     }]
 
     # 优化的置信度计算
@@ -318,6 +335,7 @@ def _build_response_data(answer: str, vector_results: list, query_analysis: dict
         confidence=confidence,
         processing_time=time.time() - start_time
     )
+
 
 
 def _calculate_response_confidence(vector_results: list, query_analysis: dict) -> float:
@@ -785,15 +803,20 @@ async def _generate_streaming_response(vector_results: List, query: str, user_ct
         
         # 判断是否有相关文档
         if vector_results:
-            # 基于文档的回答
+            # 基于文档的回答 - 不在开头添加来源标识
+            # 因为回答中的【文档依据】部分已经说明了来源
             context_docs = agent._format_context_documents(vector_results)
             prompt = agent._build_enhanced_prompt(query, context_docs, user_ctx)
         else:
-            # 通用知识回答
+            # 通用知识回答 - 先输出来源标识
+            yield "💡 **信息来源：AI通用知识（非公司文档）**\n\n"
+            
             prompt = f"""你是一个专业的人事知识库助手。用户问题：{query}
 
 请基于你的通用知识回答这个问题。如果这个问题与人事管理相关，请提供专业的建议。
-如果问题超出人事领域，请礼貌地说明你主要负责人事相关问题。"""
+如果问题超出人事领域，请礼貌地说明你主要负责人事相关问题。
+
+注意：不要在回答中重复添加"信息来源"标识，因为已经在前面添加过了。"""
         
         # 使用阿里云API的流式生成
         try:
@@ -802,8 +825,11 @@ async def _generate_streaming_response(vector_results: List, query: str, user_ct
             # 使用 astream 进行异步流式生成
             async for chunk in agent.llm.astream(prompt):
                 if chunk.content:
-                    # 直接输出每个 chunk，实现真正的流式效果
-                    yield chunk.content
+                    # 过滤掉LLM可能重复添加的来源标识
+                    content = chunk.content
+                    if "信息来源" not in content or content.index("信息来源") > 10:
+                        # 直接输出每个 chunk，实现真正的流式效果
+                        yield content
                     
         except Exception as e:
             logger.error(f"LLM流式生成失败: {str(e)}")

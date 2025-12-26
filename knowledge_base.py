@@ -5,13 +5,13 @@ from typing import List, Tuple, Optional
 from fastapi import UploadFile, HTTPException
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, UnstructuredPDFLoader
 from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings
 from logging_setup import logger
 from config import (
     MAX_FILE_SIZE, SUPPORTED_FORMATS, CHROMA_DB_PATH, CHROMA_COLLECTION_NAME,
     DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, EMBEDDING_MODEL
 )
 from document_splitter import create_hr_splitter
+from dashscope_embeddings import DashScopeEmbeddings
 
 # 全局向量存储实例
 vector_store = None
@@ -21,17 +21,15 @@ def init_chroma():
     global vector_store
     if vector_store is None:
         try:
-            # 配置阿里云百炼的Embedding（使用正确的参数）
-            embeddings = OpenAIEmbeddings(
+            # 使用自定义的DashScopeEmbeddings适配器
+            embeddings = DashScopeEmbeddings(
+                api_key=DASHSCOPE_API_KEY,
                 model=EMBEDDING_MODEL,
-                openai_api_key=DASHSCOPE_API_KEY,
-                openai_api_base=DASHSCOPE_BASE_URL,
-                # 阿里云特定配置
-                chunk_size=2000,  # 每批处理的文本数量
-                max_retries=3
+                base_url=DASHSCOPE_BASE_URL
             )
             
             logger.info(f"配置阿里云Embedding模型: {EMBEDDING_MODEL}")
+            logger.info(f"API Base URL: {DASHSCOPE_BASE_URL}")
             
             # 创建或加载ChromaDB向量存储
             vector_store = Chroma(
@@ -96,12 +94,19 @@ class VectorManager:
             if not isinstance(metadatas, list):
                 metadatas = [metadatas]
             
-            # 过滤空文本
+            # 过滤空文本并确保格式正确
             valid_texts = []
             valid_metadatas = []
             for i, text in enumerate(texts):
                 if text and isinstance(text, str) and text.strip():
-                    valid_texts.append(text.strip())
+                    # 确保文本是纯字符串，移除特殊字符
+                    clean_text = str(text).strip()
+                    # 限制单个文本长度，避免API限制
+                    if len(clean_text) > 8000:
+                        logger.warning(f"文本块 {i} 过长({len(clean_text)}字符)，截断到8000字符")
+                        clean_text = clean_text[:8000]
+                    
+                    valid_texts.append(clean_text)
                     valid_metadatas.append(metadatas[i] if i < len(metadatas) else {})
             
             if not valid_texts:
@@ -119,12 +124,22 @@ class VectorManager:
                     base_id = str(uuid.uuid4())
                     ids = [f"{base_id}_chunk_{i}" for i in range(len(valid_texts))]
             
-            # 使用add_texts方法（更稳定）
-            self.vector_store.add_texts(
-                texts=valid_texts,
-                metadatas=valid_metadatas,
-                ids=ids
-            )
+            # 分批添加，避免单次请求过大
+            batch_size = 10
+            for i in range(0, len(valid_texts), batch_size):
+                batch_texts = valid_texts[i:i+batch_size]
+                batch_metadatas = valid_metadatas[i:i+batch_size]
+                batch_ids = ids[i:i+batch_size]
+                
+                logger.info(f"添加批次 {i//batch_size + 1}/{(len(valid_texts)-1)//batch_size + 1}，包含 {len(batch_texts)} 个文本")
+                
+                # 使用add_texts方法
+                self.vector_store.add_texts(
+                    texts=batch_texts,
+                    metadatas=batch_metadatas,
+                    ids=batch_ids
+                )
+            
             logger.info(f"成功添加 {len(valid_texts)} 个文档到向量存储")
             return True
             
@@ -426,13 +441,17 @@ def process_upload_file(file: UploadFile) -> List[str]:
             # 记录原始文档内容长度
             for i, doc in enumerate(documents):
                 logger.info(f"原始文档 {i+1} 内容长度: {len(doc.page_content)} 字符")
+                logger.info(f"原始文档 {i+1} 前100字符: {doc.page_content[:100]}")
             
+            # 调用split_documents
+            logger.info("开始调用splitter.split_documents...")
             split_docs = splitter.split_documents(documents)
             logger.info(f"文档分割完成，分块数: {len(split_docs)}")
             
             # 记录每个分块的长度
-            for i, doc in enumerate(split_docs[:5]):  # 只记录前5个
-                logger.info(f"分块 {i+1} 长度: {len(doc.page_content)} 字符")
+            for i, doc in enumerate(split_docs[:10]):  # 记录前10个
+                logger.info(f"分块 {i+1} 长度: {len(doc.page_content)} 字符，前50字符: {doc.page_content[:50]}")
+
             
             # 7. 提取文本内容
             valid_chunks = []

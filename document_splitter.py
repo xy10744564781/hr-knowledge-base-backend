@@ -37,6 +37,36 @@ class SemanticHRSplitter(TextSplitter):
             '招聘': ['招聘', '面试', '录用', '招聘流程']
         }
     
+    def split_documents(self, documents: List[Document]) -> List[Document]:
+        """重写split_documents方法，确保正确调用split_text"""
+        logger.info(f"SemanticHRSplitter.split_documents 被调用，文档数: {len(documents)}")
+        
+        all_splits = []
+        for doc in documents:
+            # 调用split_text切割文本
+            text_chunks = self.split_text(doc.page_content)
+            logger.info(f"文档切割成 {len(text_chunks)} 个文本块")
+            
+            # 为每个文本块创建Document对象
+            for i, chunk in enumerate(text_chunks):
+                if chunk and chunk.strip():  # 过滤空块
+                    # 提取关键词
+                    keywords = self._extract_keywords(chunk)
+                    
+                    # 复制原始元数据并添加新信息
+                    metadata = doc.metadata.copy() if hasattr(doc, 'metadata') and doc.metadata else {}
+                    metadata.update({
+                        'keywords': keywords,
+                        'chunk_length': len(chunk),
+                        'chunk_index': i,
+                        'has_section_title': '【' in chunk and '】' in chunk
+                    })
+                    
+                    all_splits.append(Document(page_content=chunk, metadata=metadata))
+        
+        logger.info(f"总共生成 {len(all_splits)} 个有效文档块")
+        return all_splits
+    
     def split_text(self, text: str) -> List[str]:
         """切割文本为语义完整的块"""
         from logging_setup import logger
@@ -51,12 +81,18 @@ class SemanticHRSplitter(TextSplitter):
             logger.info(f"未识别到章节结构，使用递归切割（文本长度: {len(text)}）")
             chunks = self._recursive_split(text)
             logger.info(f"递归切割完成，生成 {len(chunks)} 个块")
+            # 过滤空块
+            chunks = [c for c in chunks if c and c.strip()]
             return chunks
         
         # 基于章节进行切割
         chunks = []
         for section in sections:
             section_text = section['content']
+            
+            # 跳过空章节
+            if not section_text or not section_text.strip():
+                continue
             
             if len(section_text) <= self.chunk_size:
                 # 章节足够小，直接作为一个chunk
@@ -67,6 +103,8 @@ class SemanticHRSplitter(TextSplitter):
                 chunks.extend(sub_chunks)
         
         logger.info(f"章节切割完成，生成 {len(chunks)} 个块")
+        # 过滤空块
+        chunks = [c for c in chunks if c and c.strip()]
         return chunks
     
     def _identify_sections(self, text: str) -> List[Dict[str, Any]]:
@@ -186,25 +224,65 @@ class SemanticHRSplitter(TextSplitter):
                 parts = text.split(separator)
                 current_chunk = ''
                 
-                for part in parts:
-                    if len(current_chunk) + len(part) + len(separator) <= self.chunk_size:
-                        current_chunk += part + separator
+                logger.info(f"尝试使用分隔符 '{repr(separator)}' 切割，共 {len(parts)} 个部分")
+                
+                for i, part in enumerate(parts):
+                    # 跳过空部分
+                    if not part.strip():
+                        continue
+                    
+                    test_chunk = current_chunk + part + separator
+                    
+                    if len(test_chunk) <= self.chunk_size:
+                        # 还能继续添加
+                        current_chunk = test_chunk
                     else:
+                        # 超过大小限制
                         if len(current_chunk.strip()) >= self.min_chunk_size:
                             chunks.append(current_chunk.strip())
+                            logger.info(f"生成chunk {len(chunks)}, 长度: {len(current_chunk.strip())}")
                         
-                        # 添加overlap
-                        overlap = self._get_overlap_text(current_chunk)
-                        current_chunk = overlap + part + separator
+                        # 开始新chunk，添加overlap
+                        if current_chunk:
+                            overlap = self._get_overlap_text(current_chunk)
+                            current_chunk = overlap + part + separator
+                        else:
+                            # 如果当前chunk为空（单个part就超过chunk_size）
+                            if len(part) > self.chunk_size:
+                                # 强制切割这个大part
+                                logger.warning(f"单个部分过大({len(part)}字符)，强制切割")
+                                for j in range(0, len(part), self.chunk_size - self.chunk_overlap):
+                                    sub_part = part[j:j + self.chunk_size]
+                                    if len(sub_part) >= self.min_chunk_size:
+                                        chunks.append(sub_part)
+                                current_chunk = ''
+                            else:
+                                current_chunk = part + separator
                 
+                # 保存最后一个chunk
                 if len(current_chunk.strip()) >= self.min_chunk_size:
                     chunks.append(current_chunk.strip())
+                    logger.info(f"生成最后chunk {len(chunks)}, 长度: {len(current_chunk.strip())}")
                 
-                if chunks:
+                # 如果成功切割成多个块，返回结果
+                if len(chunks) > 1:
+                    logger.info(f"使用分隔符 '{repr(separator)}' 成功切割成 {len(chunks)} 个块")
                     return chunks
+                else:
+                    # 这个分隔符效果不好，清空chunks尝试下一个
+                    logger.info(f"分隔符 '{repr(separator)}' 效果不佳，尝试下一个")
+                    chunks = []
         
         # 如果所有分隔符都失败，强制按大小切割
-        return [text[i:i+self.chunk_size] for i in range(0, len(text), self.chunk_size - self.chunk_overlap)]
+        logger.warning(f"所有分隔符都失败，强制按大小切割（文本长度: {len(text)}）")
+        chunks = []
+        for i in range(0, len(text), self.chunk_size - self.chunk_overlap):
+            chunk = text[i:i + self.chunk_size]
+            if len(chunk) >= self.min_chunk_size:
+                chunks.append(chunk)
+        
+        logger.info(f"强制切割完成，生成 {len(chunks)} 个块")
+        return chunks
     
     def _extract_keywords(self, text: str) -> List[str]:
         """提取文本中的人事关键词"""
@@ -214,26 +292,6 @@ class SemanticHRSplitter(TextSplitter):
                 if word in text:
                     keywords.append(word)
         return list(set(keywords))
-    
-    def create_documents(self, texts: List[str], metadatas: List[Dict] = None) -> List[Document]:
-        """创建带元数据的文档对象"""
-        documents = []
-        
-        for i, text in enumerate(texts):
-            # 提取关键词
-            keywords = self._extract_keywords(text)
-            
-            # 构建元数据
-            metadata = metadatas[i] if metadatas and i < len(metadatas) else {}
-            metadata.update({
-                'keywords': keywords,
-                'chunk_length': len(text),
-                'has_section_title': '【' in text and '】' in text
-            })
-            
-            documents.append(Document(page_content=text, metadata=metadata))
-        
-        return documents
 
 
 def create_hr_splitter(chunk_size: int = None, chunk_overlap: int = None) -> SemanticHRSplitter:
