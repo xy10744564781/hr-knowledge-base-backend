@@ -21,11 +21,14 @@ def init_chroma():
     global vector_store
     if vector_store is None:
         try:
-            # 配置阿里云百炼的Embedding
+            # 配置阿里云百炼的Embedding（使用正确的参数）
             embeddings = OpenAIEmbeddings(
                 model=EMBEDDING_MODEL,
                 openai_api_key=DASHSCOPE_API_KEY,
-                openai_api_base=DASHSCOPE_BASE_URL
+                openai_api_base=DASHSCOPE_BASE_URL,
+                # 阿里云特定配置
+                chunk_size=2000,  # 每批处理的文本数量
+                max_retries=3
             )
             
             logger.info(f"配置阿里云Embedding模型: {EMBEDDING_MODEL}")

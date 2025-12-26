@@ -39,12 +39,19 @@ class SemanticHRSplitter(TextSplitter):
     
     def split_text(self, text: str) -> List[str]:
         """切割文本为语义完整的块"""
+        from logging_setup import logger
+        
         # 识别章节结构
         sections = self._identify_sections(text)
         
+        logger.info(f"识别到 {len(sections)} 个章节")
+        
         if not sections:
             # 如果没有明显的章节结构，使用递归切割
-            return self._recursive_split(text)
+            logger.info(f"未识别到章节结构，使用递归切割（文本长度: {len(text)}）")
+            chunks = self._recursive_split(text)
+            logger.info(f"递归切割完成，生成 {len(chunks)} 个块")
+            return chunks
         
         # 基于章节进行切割
         chunks = []
@@ -59,6 +66,7 @@ class SemanticHRSplitter(TextSplitter):
                 sub_chunks = self._split_large_section(section_text, section['title'])
                 chunks.extend(sub_chunks)
         
+        logger.info(f"章节切割完成，生成 {len(chunks)} 个块")
         return chunks
     
     def _identify_sections(self, text: str) -> List[Dict[str, Any]]:
