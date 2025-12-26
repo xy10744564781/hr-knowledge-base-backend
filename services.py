@@ -24,61 +24,72 @@ try:
     os.environ['ANONYMIZED_TELEMETRY'] = 'False'
     os.environ['CHROMA_TELEMETRY'] = 'False'
     
-    chroma_global = init_chroma()
+    from knowledge_base import init_chroma, get_vector_manager
+    from query_router import create_query_router
+    
+    vector_store = init_chroma()
     vector_manager = get_vector_manager()
+    query_router = create_query_router()
     
     # 初始化响应生成器
     hr_agent = get_hr_agent()
     
-    if chroma_global:
-        logger.info('ChromaDB向量库初始化成功')
+    if vector_store:
+        logger.info('ChromaDB向量库初始化成功（使用LangChain + 阿里云API）')
     else:
         logger.warning('ChromaDB向量库初始化失败，系统将以简化模式运行')
         
 except Exception as e:
     logger.error(f'向量库初始化过程中发生错误: {str(e)}', exc_info=True)
-    chroma_global = None
+    vector_store = None
     vector_manager = None
+    query_router = None
     
     # 简化模式下的响应生成器
     hr_agent = get_hr_agent()
 
 def service_query_knowledge(request: QueryRequest) -> QueryResponse:
-    """处理人事知识查询请求 - 简化版本"""
+    """处理人事知识查询请求 - 使用智能路由"""
     start_time = time.time()
     logger.info(f"收到人事知识查询: {request.question}")
 
     try:
+        if not query_router or not vector_store:
+            raise HTTPException(status_code=500, detail="系统未正确初始化")
+        
         # 查询预处理
         processed_query = _preprocess_query(request.question)
         logger.info(f"查询预处理完成: {processed_query}")
 
-        # 查询意图分析
-        query_analysis = analyze_query(processed_query)
-        logger.info(f"查询意图分析: {query_analysis}")
-
-        # 向量数据库检索
-        vector_results = _execute_vector_search(processed_query, query_analysis, request.user_ctx)
-        
-        if not vector_results:
-            return _handle_empty_results(request.question, start_time)
-
-        # 直接调用LLM生成回答
+        # 使用查询路由器进行智能路由
         user_ctx_dict = _build_user_context(request.user_ctx)
-        logger.info("开始LLM回答生成...")
+        route_result = query_router.route(processed_query, vector_store, user_ctx_dict)
         
-        answer = integrate_results(vector_results, [], processed_query, user_ctx_dict)
+        strategy = route_result['strategy']
+        documents = route_result['documents']
+        evaluation = route_result['evaluation']
         
-        logger.info("LLM回答生成完成")
+        logger.info(f"路由策略: {strategy}, 文档数: {len(documents)}")
+        
+        # 根据策略生成回答
+        if strategy == 'document_based':
+            # 基于文档的回答
+            answer = hr_agent.generate_response(processed_query, documents, user_ctx_dict)
+        else:
+            # 通用知识回答
+            answer = hr_agent.generate_response(processed_query, [], user_ctx_dict)
+        
+        logger.info("回答生成完成")
 
         # 构建响应数据
         response_data = _build_response_data(
             answer=answer,
-            vector_results=vector_results,
-            query_analysis=query_analysis,
+            vector_results=documents,
+            query_analysis={'strategy': strategy},
             original_query=request.question,
             processed_query=processed_query,
-            start_time=start_time
+            start_time=start_time,
+            evaluation=evaluation
         )
 
         logger.info("人事知识查询成功完成")
@@ -273,19 +284,21 @@ def _generate_query_suggestions(query: str) -> list:
     return suggestions[:3]  # 最多3个建议
 
 def _build_response_data(answer: str, vector_results: list, query_analysis: dict, 
-                        original_query: str, processed_query: str, start_time: float) -> QueryResponse:
+                        original_query: str, processed_query: str, start_time: float,
+                        evaluation: dict = None) -> QueryResponse:
     """构建优化的响应数据"""
     # 构建详细的来源数据
     source_data = [{
         "tool": "hr_knowledge_search",
         "original_query": original_query,
         "processed_query": processed_query,
-        "intent_analysis": query_analysis,
+        "strategy": query_analysis.get('strategy', 'unknown'),
+        "evaluation": evaluation or {},
         "search_results": [
             {
                 "content": doc.page_content,
                 "metadata": doc.metadata if hasattr(doc, 'metadata') else {},
-                "relevance_score": getattr(doc, 'score', 0.0),
+                "relevance_score": doc.metadata.get('score', 0.0) if hasattr(doc, 'metadata') else 0.0,
                 "document_id": doc.metadata.get('document_id', '') if hasattr(doc, 'metadata') else '',
                 "title": doc.metadata.get('title', '') if hasattr(doc, 'metadata') else ''
             } for doc in vector_results
@@ -294,7 +307,10 @@ def _build_response_data(answer: str, vector_results: list, query_analysis: dict
     }]
 
     # 优化的置信度计算
-    confidence = _calculate_response_confidence(vector_results, query_analysis)
+    if evaluation:
+        confidence = evaluation.get('max_score', 0.5)
+    else:
+        confidence = _calculate_response_confidence(vector_results, query_analysis)
 
     return QueryResponse(
         answer=answer,
@@ -594,24 +610,25 @@ def service_search_documents(query: str, category: Optional[str] = None, access_
 def service_health_check() -> HealthResponse:
     """系统健康检查"""
     # 检查各组件状态
-    vector_db_status = "active" if chroma_global else "inactive"
+    vector_db_status = "active" if vector_store else "inactive"
     
     # 如果关键组件不可用，系统状态为警告
-    system_status = "ok" if chroma_global else "warning"
+    system_status = "ok" if vector_store else "warning"
     
     detail = {
-        "version": "1.0",
-        "mode": "full" if chroma_global else "simplified",
+        "version": "2.0",
+        "mode": "api" if vector_store else "simplified",
         "components": {
             "vector_db": vector_db_status,
-            "llm_integration": "configured",
-            "api_server": "active"
+            "llm_integration": "alibaba_cloud",
+            "api_server": "active",
+            "query_router": "active" if query_router else "inactive"
         }
     }
     
     # 如果是简化模式，添加说明
-    if not chroma_global:
-        detail["notice"] = "系统运行在简化模式，向量搜索功能不可用。建议升级SQLite版本或使用main_simple.py"
+    if not vector_store:
+        detail["notice"] = "系统运行在简化模式，向量搜索功能不可用。"
     
     return HealthResponse(
         status=system_status,
@@ -664,11 +681,19 @@ def service_get_collection_stats() -> dict:
         raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
 
 async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerator[dict, None]:
-    """处理人事知识查询请求 - 流式版本"""
+    """处理人事知识查询请求 - 流式版本（使用智能路由）"""
     start_time = time.time()
     logger.info(f"收到流式查询: {request.question}")
 
     try:
+        if not query_router or not vector_store:
+            yield {
+                'type': 'error',
+                'message': '系统未正确初始化',
+                'error_type': 'SystemError'
+            }
+            return
+        
         # 1. 发送查询预处理状态
         yield {
             'type': 'status',
@@ -681,64 +706,38 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
         processed_query = _preprocess_query(request.question)
         logger.info(f"查询预处理完成: {processed_query}")
         
-        # 2. 发送意图分析状态
+        # 2. 发送路由分析状态
         yield {
             'type': 'status',
-            'stage': 'intent_analysis',
-            'message': '正在分析查询意图...',
-            'progress': 20
-        }
-
-        # 查询意图分析
-        query_analysis = analyze_query(processed_query)
-        logger.info(f"查询意图分析: {query_analysis}")
-
-        # 3. 发送向量检索状态
-        yield {
-            'type': 'status',
-            'stage': 'vector_search',
-            'message': '正在搜索相关文档...',
+            'stage': 'routing',
+            'message': '正在分析查询并路由...',
             'progress': 30
         }
 
-        # 向量数据库检索
-        vector_results = _execute_vector_search(processed_query, query_analysis, request.user_ctx)
+        # 使用查询路由器
+        user_ctx_dict = _build_user_context(request.user_ctx)
+        route_result = query_router.route(processed_query, vector_store, user_ctx_dict)
         
-        if not vector_results:
-            yield {
-                'type': 'status',
-                'stage': 'no_results',
-                'message': '未找到相关文档，生成通用回答...',
-                'progress': 40
-            }
-            
-            # 处理空结果
-            empty_response = _handle_empty_results(request.question, start_time)
-            yield {
-                'type': 'content',
-                'content': empty_response.answer,
-                'is_complete': True,
-                'confidence': empty_response.confidence,
-                'processing_time': empty_response.processing_time
-            }
-            return
-
-        # 4. 发送LLM生成开始状态
+        strategy = route_result['strategy']
+        documents = route_result['documents']
+        evaluation = route_result['evaluation']
+        
+        logger.info(f"路由策略: {strategy}, 文档数: {len(documents)}")
+        
+        # 3. 发送LLM生成开始状态
         yield {
             'type': 'status',
             'stage': 'llm_generation',
-            'message': '正在生成回答...',
+            'message': f'正在生成回答（策略: {strategy}）...',
             'progress': 50
         }
 
-        # 5. 流式生成LLM回答
-        user_ctx_dict = _build_user_context(request.user_ctx)
+        # 4. 流式生成LLM回答
         logger.info("开始流式LLM回答生成...")
         
-        # 使用流式生成
         full_answer = ""
         chunk_count = 0
-        async for chunk in _generate_streaming_response(vector_results, processed_query, user_ctx_dict):
+        async for chunk in _generate_streaming_response(documents, processed_query, user_ctx_dict):
             full_answer += chunk
             chunk_count += 1
             logger.info(f"[Stream] Chunk #{chunk_count}, length: {len(chunk)}, total: {len(full_answer)}")
@@ -746,14 +745,14 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
                 'type': 'content',
                 'content': chunk,
                 'is_complete': False,
-                'progress': min(90, 50 + (len(full_answer) / 10))  # 动态进度
+                'progress': min(90, 50 + (len(full_answer) / 10))
             }
         
         logger.info("流式LLM回答生成完成")
 
-        # 6. 发送完成状态
+        # 5. 发送完成状态
         processing_time = time.time() - start_time
-        confidence = _calculate_response_confidence(vector_results, query_analysis)
+        confidence = evaluation.get('max_score', 0.5)
         
         yield {
             'type': 'complete',
@@ -762,7 +761,8 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
             'full_answer': full_answer,
             'confidence': confidence,
             'processing_time': processing_time,
-            'source_count': len(vector_results)
+            'source_count': len(documents),
+            'strategy': strategy
         }
 
         logger.info("流式人事知识查询成功完成")
@@ -776,20 +776,26 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
         }
 
 async def _generate_streaming_response(vector_results: List, query: str, user_ctx: Dict) -> AsyncGenerator[str, None]:
-    """生成流式LLM响应 - 使用真正的流式API"""
+    """生成流式LLM响应 - 使用阿里云API的流式接口"""
     try:
         agent = get_hr_agent()
         if not agent.llm:
             yield "抱歉，AI助手暂时不可用，请稍后再试。"
             return
         
-        # 格式化上下文文档
-        context_docs = agent._format_context_documents(vector_results)
+        # 判断是否有相关文档
+        if vector_results:
+            # 基于文档的回答
+            context_docs = agent._format_context_documents(vector_results)
+            prompt = agent._build_enhanced_prompt(query, context_docs, user_ctx)
+        else:
+            # 通用知识回答
+            prompt = f"""你是一个专业的人事知识库助手。用户问题：{query}
+
+请基于你的通用知识回答这个问题。如果这个问题与人事管理相关，请提供专业的建议。
+如果问题超出人事领域，请礼貌地说明你主要负责人事相关问题。"""
         
-        # 构建提示词
-        prompt = agent._build_enhanced_prompt(query, context_docs, user_ctx)
-        
-        # 使用 Ollama 的真正流式 API
+        # 使用阿里云API的流式生成
         try:
             logger.info("开始使用流式API生成回答...")
             

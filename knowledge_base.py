@@ -4,61 +4,61 @@ import mimetypes
 from typing import List, Tuple, Optional
 from fastapi import UploadFile, HTTPException
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, UnstructuredPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_openai import OpenAIEmbeddings
 from logging_setup import logger
-from config import MAX_FILE_SIZE, SUPPORTED_FORMATS
+from config import (
+    MAX_FILE_SIZE, SUPPORTED_FORMATS, CHROMA_DB_PATH, CHROMA_COLLECTION_NAME,
+    DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, EMBEDDING_MODEL
+)
+from document_splitter import create_hr_splitter
 
-chroma_collection = None
+# 全局向量存储实例
+vector_store = None
 
 def init_chroma():
-    """初始化ChromaDB向量数据库"""
-    global chroma_collection
-    if chroma_collection is None:
+    """初始化ChromaDB向量数据库（使用LangChain + 阿里云API）"""
+    global vector_store
+    if vector_store is None:
         try:
-            import chromadb
-            from chromadb.config import Settings
-            
-            # 创建设置，明确禁用遥测
-            settings = Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
+            # 配置阿里云百炼的Embedding
+            embeddings = OpenAIEmbeddings(
+                model=EMBEDDING_MODEL,
+                openai_api_key=DASHSCOPE_API_KEY,
+                openai_api_base=DASHSCOPE_BASE_URL
             )
             
-            # 尝试持久化模式
-            client = chromadb.PersistentClient(
-                path="./chroma_db",
-                settings=settings
-            )
-            logger.info("使用ChromaDB持久化模式")
+            logger.info(f"配置阿里云Embedding模型: {EMBEDDING_MODEL}")
             
-            # 获取或创建集合
-            chroma_collection = client.get_or_create_collection(
-                name="hr_knowledge_base",
-                metadata={"description": "人事知识库向量存储"}
+            # 创建或加载ChromaDB向量存储
+            vector_store = Chroma(
+                collection_name=CHROMA_COLLECTION_NAME,
+                embedding_function=embeddings,
+                persist_directory=CHROMA_DB_PATH
             )
             
-            logger.info("ChromaDB初始化成功")
+            logger.info(f"ChromaDB初始化成功（集合: {CHROMA_COLLECTION_NAME}）")
             
         except Exception as e:
             logger.error(f"ChromaDB初始化失败: {e}", exc_info=True)
-            chroma_collection = None
+            vector_store = None
             
-    return chroma_collection
+    return vector_store
 
 class VectorManager:
-    """向量管理器包装类"""
+    """向量管理器包装类（基于LangChain Chroma）"""
     
-    def __init__(self, collection):
-        self.collection = collection
+    def __init__(self, vector_store):
+        self.vector_store = vector_store
     
     def check_duplicate_title(self, title, exclude_doc_id=None):
         """检查标题是否重复"""
-        if not self.collection:
+        if not self.vector_store:
             return False
             
         try:
-            # 查询所有文档的元数据
-            results = self.collection.get(include=['metadatas'])
+            # 使用LangChain的get方法查询
+            results = self.vector_store.get()
             
             if not results or not results.get('metadatas'):
                 return False
@@ -67,7 +67,7 @@ class VectorManager:
             for i, metadata in enumerate(results['metadatas']):
                 if metadata and metadata.get('title') == title:
                     # 如果指定了排除的文档ID，跳过该文档
-                    if exclude_doc_id and results.get('ids') and results['ids'][i] == exclude_doc_id:
+                    if exclude_doc_id and results.get('ids') and results['ids'][i].startswith(exclude_doc_id):
                         continue
                     return True
                     
@@ -79,63 +79,66 @@ class VectorManager:
     
     def add_document(self, texts, metadatas, document_id=None, ids=None):
         """添加文档"""
-        if not self.collection:
-            raise Exception("ChromaDB未初始化")
+        if not self.vector_store:
+            raise Exception("向量存储未初始化")
         
-        # 生成文档ID
-        if ids is None:
-            if isinstance(texts, list):
+        try:
+            # 使用智能文档切割器
+            from document_splitter import create_hr_splitter
+            from langchain.schema import Document
+            
+            # 创建Document对象
+            documents = []
+            for i, text in enumerate(texts):
+                metadata = metadatas[i] if i < len(metadatas) else {}
+                documents.append(Document(page_content=text, metadata=metadata))
+            
+            # 生成IDs
+            if ids is None:
                 if document_id:
-                    ids = [f"{document_id}_chunk_{i}" for i in range(len(texts))]
+                    ids = [f"{document_id}_chunk_{i}" for i in range(len(documents))]
                 else:
                     import uuid
                     base_id = str(uuid.uuid4())
-                    ids = [f"{base_id}_chunk_{i}" for i in range(len(texts))]
-            else:
-                ids = [document_id or str(uuid.uuid4())]
-                texts = [texts]
-                metadatas = [metadatas]
-        else:
-            # 如果提供了ids，确保texts和metadatas是列表
-            if not isinstance(texts, list):
-                texts = [texts]
-            if not isinstance(metadatas, list):
-                metadatas = [metadatas]
+                    ids = [f"{base_id}_chunk_{i}" for i in range(len(documents))]
             
-        try:
-            self.collection.add(ids=ids, documents=texts, metadatas=metadatas)
+            # 添加到向量存储
+            self.vector_store.add_documents(documents, ids=ids)
+            logger.info(f"成功添加 {len(documents)} 个文档到向量存储")
             return True
+            
         except Exception as e:
-            logger.error(f"添加文档时出错: {e}")
+            logger.error(f"添加文档时出错: {e}", exc_info=True)
             return False
     
     def delete_document(self, document_id):
         """删除文档"""
-        if not self.collection:
-            raise Exception("ChromaDB未初始化")
+        if not self.vector_store:
+            raise Exception("向量存储未初始化")
         
         try:
-            # 查找所有相关的chunk
-            results = self.collection.get(include=['metadatas'])
+            # 查找所有相关的chunk IDs
+            results = self.vector_store.get()
             if results and results.get('ids'):
-                # 找到所有属于该文档的chunk
-                chunk_ids = []
-                for i, metadata in enumerate(results.get('metadatas', [])):
-                    if metadata and metadata.get('document_id') == document_id:
-                        chunk_ids.append(results['ids'][i])
+                chunk_ids = [
+                    id for id in results['ids']
+                    if id.startswith(document_id)
+                ]
                 
                 if chunk_ids:
-                    self.collection.delete(ids=chunk_ids)
+                    self.vector_store.delete(ids=chunk_ids)
+                    logger.info(f"删除文档 {document_id}，共 {len(chunk_ids)} 个chunks")
                     return True
             return False
+            
         except Exception as e:
             logger.error(f"删除文档时出错: {e}")
             return False
     
     def update_document(self, document_id, texts, metadatas, ids=None):
         """更新文档"""
-        if not self.collection:
-            raise Exception("ChromaDB未初始化")
+        if not self.vector_store:
+            raise Exception("向量存储未初始化")
         
         try:
             # 先删除旧的chunks
@@ -147,53 +150,49 @@ class VectorManager:
             return False
     
     def search_documents(self, query, k=10, filter_metadata=None):
-        """搜索文档"""
-        if not self.collection:
-            raise Exception("ChromaDB未初始化")
+        """搜索文档（使用LangChain接口）"""
+        if not self.vector_store:
+            raise Exception("向量存储未初始化")
         
         try:
-            where_clause = filter_metadata if filter_metadata else None
-            results = self.collection.query(
-                query_texts=[query], 
-                n_results=k,
-                where=where_clause,
-                include=['documents', 'metadatas', 'distances']
+            # 使用LangChain的similarity_search_with_score
+            results = self.vector_store.similarity_search_with_score(
+                query,
+                k=k,
+                filter=filter_metadata
             )
             
-            # 转换ChromaDB结果为文档对象列表
+            # 转换结果格式，添加分数到metadata
             documents = []
-            if results and 'documents' in results and results['documents']:
-                docs = results['documents'][0]  # 第一个查询的结果
-                metadatas = results.get('metadatas', [[]])[0]
-                distances = results.get('distances', [[]])[0]
+            for doc, score in results:
+                # 将距离转换为相似度分数
+                similarity_score = max(0.0, 1.0 - (score / 2.0))
                 
-                for i, doc_content in enumerate(docs):
-                    # 创建文档对象
-                    doc_obj = type('Document', (), {
-                        'page_content': doc_content,
-                        'metadata': metadatas[i] if i < len(metadatas) else {},
-                        'score': max(0.0, 1.0 - distances[i]) if i < len(distances) else 0.0  # 转换距离为相似度分数，确保非负
-                    })()
-                    documents.append(doc_obj)
+                if not hasattr(doc, 'metadata'):
+                    doc.metadata = {}
+                doc.metadata['score'] = similarity_score
+                
+                documents.append(doc)
             
             return documents
+            
         except Exception as e:
-            logger.error(f"搜索文档时出错: {e}")
+            logger.error(f"搜索文档时出错: {e}", exc_info=True)
             return []
     
     def list_documents(self, limit=None):
         """列出文档"""
-        if not self.collection:
+        if not self.vector_store:
             return []
         
         try:
-            results = self.collection.get(include=['metadatas'])
+            results = self.vector_store.get()
             if not results or not results.get('metadatas'):
                 return []
             
             # 按document_id分组，避免重复
             documents = {}
-            for i, metadata in enumerate(results['metadatas']):
+            for metadata in results['metadatas']:
                 if metadata and 'document_id' in metadata:
                     doc_id = metadata['document_id']
                     if doc_id not in documents:
@@ -204,25 +203,30 @@ class VectorManager:
                 doc_list = doc_list[:limit]
                 
             return doc_list
+            
         except Exception as e:
             logger.error(f"列出文档时出错: {e}")
             return []
     
     def get_collection_stats(self):
         """获取集合统计信息"""
-        if not self.collection:
+        if not self.vector_store:
             return {"total_documents": 0}
         try:
-            count = self.collection.count()
-            return {"total_documents": count}
+            results = self.vector_store.get()
+            count = len(results.get('ids', [])) if results else 0
+            return {
+                "total_documents": count,
+                "collection_name": CHROMA_COLLECTION_NAME
+            }
         except Exception as e:
             logger.error(f"获取统计信息时出错: {e}")
             return {"total_documents": 0}
 
 def get_vector_manager():
     """获取向量管理器"""
-    collection = init_chroma()
-    return VectorManager(collection)
+    store = init_chroma()
+    return VectorManager(store) if store else None
 
 def validate_file(file: UploadFile) -> Tuple[bool, str]:
     """
@@ -344,7 +348,7 @@ def create_document_loader(temp_path: str, file_ext: str, filename: str):
 def process_upload_file(file: UploadFile) -> List[str]:
     """
     处理上传的文件并提取文本内容
-    优化版本：更好的错误处理、文件验证和内存管理
+    使用智能语义切割器
     """
     logger.info(f"开始处理文件: {file.filename}")
     
@@ -377,22 +381,10 @@ def process_upload_file(file: UploadFile) -> List[str]:
         
         logger.info(f"临时文件创建成功: {temp_path}")
         
-        # 4. 获取最优分块设置
-        chunk_size, chunk_overlap = get_optimal_chunk_settings(file_ext, file_size)
-        logger.info(f"分块设置: chunk_size={chunk_size}, overlap={chunk_overlap}")
-        
-        # 5. 创建文档加载器
+        # 4. 创建文档加载器
         loader = create_document_loader(temp_path, file_ext, file.filename)
         
-        # 6. 创建文本分割器
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""]
-        )
-        
-        # 7. 加载和分割文档
+        # 5. 加载文档
         try:
             documents = loader.load()
             logger.info(f"文档加载成功，原始页数: {len(documents)}")
@@ -405,12 +397,16 @@ def process_upload_file(file: UploadFile) -> List[str]:
             if total_content < 10:
                 raise ValueError("文档内容过少，可能是空文档或格式不正确")
             
-            documents = text_splitter.split_documents(documents)
-            logger.info(f"文档分割完成，分块数: {len(documents)}")
+            # 6. 使用智能语义切割器
+            from document_splitter import create_hr_splitter
             
-            # 过滤空白或过短的块
+            splitter = create_hr_splitter()
+            split_docs = splitter.split_documents(documents)
+            logger.info(f"文档分割完成，分块数: {len(split_docs)}")
+            
+            # 7. 提取文本内容
             valid_chunks = []
-            for doc in documents:
+            for doc in split_docs:
                 content = doc.page_content.strip()
                 if len(content) >= 20:  # 至少20个字符
                     valid_chunks.append(content)
@@ -432,8 +428,11 @@ def process_upload_file(file: UploadFile) -> List[str]:
                     documents = loader.load()
                     
                     if documents:
-                        documents = text_splitter.split_documents(documents)
-                        valid_chunks = [doc.page_content.strip() for doc in documents 
+                        from document_splitter import create_hr_splitter
+                        splitter = create_hr_splitter()
+                        split_docs = splitter.split_documents(documents)
+                        
+                        valid_chunks = [doc.page_content.strip() for doc in split_docs 
                                       if len(doc.page_content.strip()) >= 20]
                         if valid_chunks:
                             logger.info(f"备用方法成功，有效块数: {len(valid_chunks)}")

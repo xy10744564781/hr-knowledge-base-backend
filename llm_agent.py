@@ -1,12 +1,15 @@
 import json
 import os
 from typing import List, Dict, Optional
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from logging_setup import logger
-from config import OLLAMA_MODEL, OLLAMA_BASE_URL
+from config import (
+    DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, LLM_MODEL,
+    LLM_TEMPERATURE, LLM_TOP_P, LLM_MAX_TOKENS
+)
 
 class HRKnowledgeAgent:
-    """人事知识库智能代理 - 优化版本"""
+    """人事知识库智能代理 - 基于阿里云百炼API"""
     
     def __init__(self):
         self.llm = None
@@ -24,23 +27,17 @@ class HRKnowledgeAgent:
             return "你是一个专业的人事知识库助手。"
     
     def _initialize_llm(self):
-        """初始化LLM - 针对qwen3:8b优化"""
+        """初始化LLM - 使用阿里云百炼API"""
         try:
-            # qwen3:8b模型优化配置
-            from langchain_ollama import ChatOllama
-            self.llm = ChatOllama(
-                model=OLLAMA_MODEL,
-                base_url=OLLAMA_BASE_URL,
-                temperature=0.1,  # 保持一致性
-                top_p=0.9,
-                num_ctx=2048,  # 增加上下文长度
-                num_predict=2048,  # 增加生成长度
-                repeat_penalty=1.1,  # 减少重复
-                top_k=30,  # qwen3:8b优化的候选词数量
-                num_thread=6,  # 针对qwen3:8b优化的线程数
-                # 移除可能导致截断的停止词
+            self.llm = ChatOpenAI(
+                model=LLM_MODEL,
+                openai_api_key=DASHSCOPE_API_KEY,
+                openai_api_base=DASHSCOPE_BASE_URL,
+                temperature=LLM_TEMPERATURE,
+                top_p=LLM_TOP_P,
+                max_tokens=LLM_MAX_TOKENS
             )
-            logger.info(f"LLM初始化成功 (完整回答模式): {OLLAMA_MODEL}")
+            logger.info(f"LLM初始化成功（阿里云百炼）: {LLM_MODEL}")
             
         except Exception as e:
             logger.error(f"LLM初始化失败: {e}")
@@ -153,17 +150,25 @@ class HRKnowledgeAgent:
         return "\n".join(summary_parts)
     
     def generate_response(self, question: str, vector_results: List, user_ctx: Dict) -> str:
-        """生成人事知识库回答 - 优化版本"""
+        """生成人事知识库回答 - 基于文档或通用知识"""
         try:
             if not self.llm:
                 logger.error("LLM未初始化，使用降级响应")
                 return self._generate_fallback_response(vector_results, question)
             
-            # 格式化上下文文档
-            context_docs = self._format_context_documents(vector_results)
-            
-            # 构建增强提示词
-            prompt = self._build_enhanced_prompt(question, context_docs, user_ctx)
+            # 判断是否有相关文档
+            if vector_results:
+                # 基于文档的回答
+                logger.info("生成基于文档的回答")
+                context_docs = self._format_context_documents(vector_results)
+                prompt = self._build_enhanced_prompt(question, context_docs, user_ctx)
+            else:
+                # 通用知识回答
+                logger.info("生成通用知识回答（不使用提示词和文档）")
+                prompt = f"""你是一个专业的人事知识库助手。用户问题：{question}
+
+请基于你的通用知识回答这个问题。如果这个问题与人事管理相关，请提供专业的建议。
+如果问题超出人事领域，请礼貌地说明你主要负责人事相关问题。"""
             
             # 生成回答
             response = self.llm.invoke(prompt)
