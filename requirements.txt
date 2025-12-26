@@ -13,14 +13,14 @@ sqlalchemy==2.0.23
 # Vector database
 chromadb==0.5.3
 
-# LangChain core components (兼容版本)
-langchain-core==0.3.0
-langchain-community==0.3.0
-langchain-chroma==0.1.4
-langchain-openai==0.2.1  # 用于调用阿里云百炼（OpenAI兼容接口）
+# LangChain core components (Python 3.11兼容版本)
+langchain-core==0.2.38
+langchain-community==0.2.16
+langchain-chroma==0.1.2
+langchain-openai==0.1.23  # 用于调用阿里云百炼（OpenAI兼容接口）
 
 # Data validation
-pydantic>=2.9.0
+pydantic==2.8.2
 
 # Document processing
 python-docx==1.1.2
