@@ -2,6 +2,11 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 
+# 清除 SOCKS 代理设置，避免 httpx 不兼容问题
+# （httpx 默认不支持 socks:// 协议）
+for _proxy_var in ['ALL_PROXY', 'all_proxy']:
+    os.environ.pop(_proxy_var, None)
+
 # 加载环境变量
 # 检查 .env 文件是否存在
 _env_file_path = os.path.join(os.path.dirname(__file__), '.env')
