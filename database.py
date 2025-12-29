@@ -6,9 +6,34 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import uuid
+import os
+from dotenv import load_dotenv
 
-# 数据库配置
-DATABASE_URL = "mysql+pymysql://root:xyxieyu123@localhost:3306/hr_knowledge_base?charset=utf8mb4"
+# 加载环境变量
+load_dotenv()
+
+# 数据库配置（从环境变量读取）
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./hr_knowledge.db")
+
+# 打印数据库配置信息（脱敏处理）
+def _mask_db_url(url: str) -> str:
+    """脱敏处理数据库URL，隐藏密码"""
+    if not url:
+        return "未设置"
+    # 隐藏密码部分
+    if "://" in url and "@" in url:
+        parts = url.split("://")
+        if len(parts) == 2:
+            protocol = parts[0]
+            rest = parts[1]
+            if "@" in rest:
+                credentials, host_db = rest.split("@", 1)
+                if ":" in credentials:
+                    username = credentials.split(":")[0]
+                    return f"{protocol}://{username}:****@{host_db}"
+    return url
+
+print(f"[数据库配置] DATABASE_URL: {_mask_db_url(DATABASE_URL)}")
 
 # 创建数据库引擎
 engine = create_engine(
