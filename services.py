@@ -763,9 +763,13 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
         # 4. 流式生成LLM回答（dev-mix：传入对话历史）
         logger.info("开始流式LLM回答生成...")
         
+        # 根据策略决定是否传递文档
+        docs_to_use = documents if strategy == 'document_based' else []
+        logger.info(f"传递给LLM的文档数: {len(docs_to_use)} (策略: {strategy})")
+        
         full_answer = ""
         chunk_count = 0
-        async for chunk in _generate_streaming_response(documents, processed_query, user_ctx_dict, chat_history):
+        async for chunk in _generate_streaming_response(docs_to_use, processed_query, user_ctx_dict, chat_history):
             full_answer += chunk
             chunk_count += 1
             logger.info(f"[Stream] Chunk #{chunk_count}, length: {len(chunk)}, total: {len(full_answer)}")

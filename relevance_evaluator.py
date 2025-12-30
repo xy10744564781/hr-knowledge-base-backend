@@ -67,8 +67,13 @@ class RelevanceEvaluator:
         relevant_ratio = relevant_count / len(documents) if documents else 0.0
         
         # 判断是否相关
-        # 策略：最高分超过阈值 或 平均分超过阈值*0.8
-        is_relevant = (max_score >= self.threshold) or (avg_score >= self.threshold * 0.8)
+        # 策略：最高分必须超过阈值，且至少有一个文档相关
+        # 如果最高分很低（< 0.3），直接判定为不相关
+        if max_score < 0.3:
+            is_relevant = False
+            logger.info(f"最高分过低({max_score:.3f} < 0.3)，判定为不相关")
+        else:
+            is_relevant = (max_score >= self.threshold) and (relevant_count > 0)
         
         logger.info(
             f"相关性评估完成: is_relevant={is_relevant}, "
