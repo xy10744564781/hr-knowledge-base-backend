@@ -51,6 +51,29 @@ class VectorManager:
     
     def __init__(self, vector_store):
         self.vector_store = vector_store
+        self.document_cache = []  # 缓存所有文档用于BM25检索（dev-mix新增）
+        self._load_existing_documents()  # 加载已有文档到缓存
+    
+    def _load_existing_documents(self):
+        """加载已有文档到缓存（用于BM25）"""
+        try:
+            if not self.vector_store:
+                return
+            
+            results = self.vector_store.get()
+            if results and results.get('documents') and results.get('metadatas'):
+                from langchain.schema import Document
+                for doc_text, metadata in zip(results['documents'], results['metadatas']):
+                    self.document_cache.append(
+                        Document(page_content=doc_text, metadata=metadata or {})
+                    )
+                logger.info(f"已加载 {len(self.document_cache)} 个文档到缓存（用于BM25）")
+        except Exception as e:
+            logger.warning(f"加载文档缓存失败: {e}")
+    
+    def get_all_documents(self):
+        """获取所有缓存的文档（用于BM25检索）"""
+        return self.document_cache
     
     def check_duplicate_title(self, title, exclude_doc_id=None):
         """检查标题是否重复"""
@@ -140,6 +163,12 @@ class VectorManager:
                     ids=batch_ids
                 )
             
+            # 同时添加到文档缓存（用于BM25）- dev-mix新增
+            docs = [Document(page_content=t, metadata=m) 
+                   for t, m in zip(valid_texts, valid_metadatas)]
+            self.document_cache.extend(docs)
+            logger.info(f"已添加 {len(docs)} 个文档到缓存")
+            
             logger.info(f"成功添加 {len(valid_texts)} 个文档到向量存储")
             return True
             
@@ -164,6 +193,15 @@ class VectorManager:
                 if chunk_ids:
                     self.vector_store.delete(ids=chunk_ids)
                     logger.info(f"删除文档 {document_id}，共 {len(chunk_ids)} 个chunks")
+                    
+                    # 同时从缓存中删除（dev-mix新增）
+                    self.document_cache = [
+                        doc for doc in self.document_cache
+                        if not (hasattr(doc, 'metadata') and 
+                               doc.metadata.get('document_id') == document_id)
+                    ]
+                    logger.info(f"已从缓存中删除文档 {document_id}")
+                    
                     return True
             return False
             

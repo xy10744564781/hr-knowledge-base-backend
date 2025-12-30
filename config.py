@@ -72,6 +72,7 @@ _config_logger.info(f"相关性阈值: {os.getenv('RELEVANCE_THRESHOLD', '0.5')}
 # 模型配置（从环境变量读取，带默认值）
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen-plus")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "gte-rerank-v2")  # 阿里云Rerank模型
 
 # LLM生成配置
 LLM_TEMPERATURE = 0.1
@@ -86,6 +87,17 @@ RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
 MAX_SEARCH_RESULTS = 5  # 检索文档数量
 QUERY_TIMEOUT = 30  # 秒
 MAX_QUERY_RESULTS = 10  # 最大查询结果数量
+
+# 混合检索配置（dev-mix分支新增）
+USE_HYBRID_SEARCH = True  # 是否启用混合检索（向量+BM25）
+VECTOR_SEARCH_WEIGHT = 0.5  # 向量检索权重
+BM25_SEARCH_WEIGHT = 0.5  # BM25检索权重
+USE_QUERY_REPHRASE = True  # 是否启用查询重述
+USE_RERANK = True  # 是否启用重排序
+RERANK_TOP_N = 5  # 重排序后保留的文档数量
+
+# 对话历史配置（dev-mix分支新增）
+MAX_HISTORY_MESSAGES = 6  # 最多保留的历史消息数（3轮对话）
 
 # 文档处理配置
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB

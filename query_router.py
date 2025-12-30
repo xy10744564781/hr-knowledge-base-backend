@@ -1,10 +1,14 @@
 """
 查询路由器 - 智能路由查询到合适的回答策略
+集成混合检索、查询重述和Rerank（dev-mix分支）
 """
 from typing import List, Dict, Any
 from langchain.schema import Document
 from logging_setup import logger
-from config import RELEVANCE_THRESHOLD, MAX_SEARCH_RESULTS
+from config import (
+    RELEVANCE_THRESHOLD, MAX_SEARCH_RESULTS,
+    USE_HYBRID_SEARCH, USE_QUERY_REPHRASE, USE_RERANK
+)
 from relevance_evaluator import RelevanceEvaluator
 
 
@@ -35,7 +39,7 @@ class QueryRouter:
         user_context: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
-        路由查询到合适的回答策略
+        路由查询到合适的回答策略（集成混合检索、查询重述和Rerank）
         
         Args:
             query: 用户查询
@@ -47,10 +51,21 @@ class QueryRouter:
             - strategy: 回答策略 ('document_based' 或 'general_knowledge')
             - documents: 相关文档列表
             - evaluation: 相关性评估结果
+            - rephrased_query: 重述后的查询（如果启用）
         """
-        # 1. 向量检索
-        logger.info(f"执行向量检索: query='{query}', k={self.max_results}")
-        documents = self._search_documents(vector_store, query)
+        # 1. 查询重述（dev-mix新增）
+        rephrased_query = query
+        if USE_QUERY_REPHRASE:
+            try:
+                from query_rephrase import rephrase_query
+                rephrased_query = rephrase_query(query)
+                logger.info(f"查询重述: '{query}' -> '{rephrased_query}'")
+            except Exception as e:
+                logger.warning(f"查询重述失败，使用原始查询: {e}")
+        
+        # 2. 混合检索（dev-mix新增）
+        logger.info(f"执行{'混合' if USE_HYBRID_SEARCH else '向量'}检索: query='{rephrased_query}', k={self.max_results}")
+        documents = self._search_documents(vector_store, rephrased_query)
         
         if not documents:
             logger.info("未找到任何文档，使用通用知识回答")
@@ -61,15 +76,25 @@ class QueryRouter:
                     'is_relevant': False,
                     'max_score': 0.0,
                     'avg_score': 0.0
-                }
+                },
+                'rephrased_query': rephrased_query
             }
         
-        logger.info(f"向量检索完成: 找到 {len(documents)} 个文档")
+        logger.info(f"检索完成: 找到 {len(documents)} 个文档")
         
-        # 2. 相关性评估
-        evaluation = self.evaluator.evaluate(query, documents)
+        # 3. Rerank重排序（dev-mix新增）
+        if USE_RERANK and len(documents) > 0:
+            try:
+                from reranker import rerank_documents
+                documents = rerank_documents(rephrased_query, documents)
+                logger.info(f"Rerank完成: 保留 {len(documents)} 个文档")
+            except Exception as e:
+                logger.warning(f"Rerank失败，使用原始排序: {e}")
         
-        # 3. 决策路由策略
+        # 4. 相关性评估
+        evaluation = self.evaluator.evaluate(rephrased_query, documents)
+        
+        # 5. 决策路由策略
         if evaluation['is_relevant']:
             strategy = 'document_based'
             relevant_docs = evaluation['relevant_docs']
@@ -82,7 +107,8 @@ class QueryRouter:
         return {
             'strategy': strategy,
             'documents': relevant_docs,
-            'evaluation': evaluation
+            'evaluation': evaluation,
+            'rephrased_query': rephrased_query
         }
     
     def _search_documents(
@@ -92,7 +118,7 @@ class QueryRouter:
         filter_dict: Dict = None
     ) -> List[Document]:
         """
-        执行向量搜索
+        执行文档搜索（支持混合检索 - dev-mix新增）
         
         Args:
             vector_store: 向量存储实例
@@ -103,7 +129,46 @@ class QueryRouter:
             文档列表
         """
         try:
-            # 使用similarity_search_with_score获取带分数的结果
+            # 如果启用混合检索
+            if USE_HYBRID_SEARCH:
+                try:
+                    from hybrid_retriever import create_hybrid_retriever
+                    from knowledge_base import get_vector_manager
+                    
+                    # 获取所有文档用于BM25
+                    vector_manager = get_vector_manager()
+                    if vector_manager:
+                        all_documents = vector_manager.get_all_documents()
+                        
+                        if all_documents:
+                            # 创建混合检索器
+                            hybrid_retriever = create_hybrid_retriever(
+                                vector_store=vector_store,
+                                documents=all_documents,
+                                k=self.max_results
+                            )
+                            
+                            # 执行混合检索
+                            documents = hybrid_retriever.get_relevant_documents(query)
+                            
+                            # 添加分数到metadata
+                            for i, doc in enumerate(documents):
+                                if not hasattr(doc, 'metadata'):
+                                    doc.metadata = {}
+                                # 基于排名的分数
+                                doc.metadata['score'] = 1.0 - (i / len(documents)) if documents else 0.0
+                            
+                            logger.info(f"混合检索完成: 找到 {len(documents)} 个文档")
+                            return documents
+                        else:
+                            logger.warning("文档缓存为空，降级到向量检索")
+                    else:
+                        logger.warning("向量管理器不可用，降级到向量检索")
+                        
+                except Exception as e:
+                    logger.warning(f"混合检索失败，降级到向量检索: {e}")
+            
+            # 降级到纯向量检索
             results = vector_store.similarity_search_with_score(
                 query,
                 k=self.max_results,
@@ -127,7 +192,7 @@ class QueryRouter:
             return documents
             
         except Exception as e:
-            logger.error(f"向量搜索失败: {e}")
+            logger.error(f"文档搜索失败: {e}")
             return []
 
 
