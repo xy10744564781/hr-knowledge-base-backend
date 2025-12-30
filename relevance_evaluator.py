@@ -46,6 +46,18 @@ class RelevanceEvaluator:
                 'relevant_ratio': 0.0
             }
         
+        # 先进行语义相关性判断
+        if not self._is_hr_related_query(query):
+            logger.info(f"查询'{query}'与人事领域无关，判定为不相关")
+            return {
+                'is_relevant': False,
+                'relevant_docs': [],
+                'max_score': 0.0,
+                'avg_score': 0.0,
+                'relevant_count': 0,
+                'relevant_ratio': 0.0
+            }
+        
         # 提取相似度分数
         scores = []
         for doc in documents:
@@ -90,6 +102,73 @@ class RelevanceEvaluator:
             'relevant_count': relevant_count,
             'relevant_ratio': relevant_ratio
         }
+    
+    def _is_hr_related_query(self, query: str) -> bool:
+        """
+        判断查询是否与人事领域相关
+        
+        Args:
+            query: 用户查询
+        
+        Returns:
+            是否与人事相关
+        """
+        # 人事相关关键词
+        hr_keywords = [
+            '考勤', '打卡', '请假', '休假', '迟到', '早退', '出勤',
+            '薪资', '工资', '薪酬', '奖金', '发放', '薪水',
+            '入职', '新员工', '报到', '入职手续',
+            '离职', '辞职', '退休', '离职手续', '离职流程',
+            '培训', '学习', '发展', '课程', '培训计划',
+            '福利', '待遇', '补贴', '津贴', '福利待遇',
+            '流程', '步骤', '程序', '办理',
+            '政策', '制度', '规定', '条例',
+            '资产', '领用', '归还', '报废',
+            '绩效', '考核', '评估',
+            '招聘', '面试', '录用',
+            '合同', '协议', '劳动合同',
+            '社保', '公积金', '五险一金',
+            '加班', '调休', '值班',
+            '部门', '岗位', '职位',
+            '员工', '人员', '职工'
+        ]
+        
+        # 非人事相关的明显标志
+        non_hr_patterns = [
+            # 数学计算
+            r'^\d+[\+\-\*/]\d+',  # 1+2, 3-1, 4*5, 6/2
+            r'=\?$',  # 以=?结尾
+            # 技术问题
+            'python', 'java', 'javascript', 'c\+\+', 'golang', 'rust',
+            'qt', 'react', 'vue', 'angular',
+            '编程', '代码', '算法', '数据结构',
+            # 常识问题
+            '什么是', '谁是', '哪里', '为什么',
+            '天气', '新闻', '股票', '比赛'
+        ]
+        
+        query_lower = query.lower()
+        
+        # 检查是否匹配非人事模式
+        import re
+        for pattern in non_hr_patterns:
+            if re.search(pattern, query_lower):
+                logger.info(f"查询匹配非人事模式: {pattern}")
+                return False
+        
+        # 检查是否包含人事关键词
+        for keyword in hr_keywords:
+            if keyword in query:
+                logger.info(f"查询包含人事关键词: {keyword}")
+                return True
+        
+        # 如果查询很短（<5个字符）且不包含人事关键词，可能是非人事问题
+        if len(query) < 5:
+            logger.info(f"查询过短且不包含人事关键词: {query}")
+            return False
+        
+        # 默认认为可能与人事相关（保守策略）
+        return True
     
     def filter_by_threshold(self, documents: List[Document]) -> List[Document]:
         """
