@@ -31,6 +31,7 @@ class QueryRequest(BaseModel):
     """查询请求模型"""
     question: str = Field(..., min_length=1, max_length=500, description="用户查询问题")
     user_ctx: UserContext = Field(default_factory=UserContext, description="用户上下文")
+    session_id: Optional[str] = Field(default=None, description="会话ID（用于对话历史）")  # dev-mix新增
 
 class DocumentCategory(str, Enum):
     """文档分类枚举"""

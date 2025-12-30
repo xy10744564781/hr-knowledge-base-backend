@@ -16,6 +16,9 @@ from llm_agent import integrate_results, analyze_query, get_hr_agent
 from typing import List, Optional, AsyncGenerator, Dict
 from config import QUERY_TIMEOUT, MAX_QUERY_RESULTS
 
+# dev-mix新增：导入对话历史管理器
+from chat_history_manager import get_history_manager, sync_history_to_manager
+
 # 初始化向量库（chroma）
 try:
     # 设置环境变量解决protobuf版本冲突和禁用遥测
@@ -699,9 +702,9 @@ def service_get_collection_stats() -> dict:
         raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
 
 async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerator[dict, None]:
-    """处理人事知识查询请求 - 流式版本（使用智能路由）"""
+    """处理人事知识查询请求 - 流式版本（使用智能路由 + 对话历史）"""
     start_time = time.time()
-    logger.info(f"收到流式查询: {request.question}")
+    logger.info(f"收到流式查询: {request.question}, session_id={request.session_id}")
 
     try:
         if not query_router or not vector_store:
@@ -711,6 +714,13 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
                 'error_type': 'SystemError'
             }
             return
+        
+        # dev-mix新增：获取对话历史
+        history_manager = get_history_manager()
+        chat_history = None
+        if request.session_id:
+            chat_history = history_manager.get_history(request.session_id)
+            logger.info(f"会话 {request.session_id} 历史消息数: {len(chat_history.messages)}")
         
         # 1. 发送查询预处理状态
         yield {
@@ -750,12 +760,12 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
             'progress': 50
         }
 
-        # 4. 流式生成LLM回答
+        # 4. 流式生成LLM回答（dev-mix：传入对话历史）
         logger.info("开始流式LLM回答生成...")
         
         full_answer = ""
         chunk_count = 0
-        async for chunk in _generate_streaming_response(documents, processed_query, user_ctx_dict):
+        async for chunk in _generate_streaming_response(documents, processed_query, user_ctx_dict, chat_history):
             full_answer += chunk
             chunk_count += 1
             logger.info(f"[Stream] Chunk #{chunk_count}, length: {len(chunk)}, total: {len(full_answer)}")
@@ -767,6 +777,12 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
             }
         
         logger.info("流式LLM回答生成完成")
+        
+        # dev-mix新增：更新对话历史
+        if request.session_id and chat_history:
+            history_manager.add_user_message(request.session_id, request.question)
+            history_manager.add_ai_message(request.session_id, full_answer)
+            logger.info(f"已更新会话 {request.session_id} 的对话历史")
 
         # 5. 发送完成状态
         processing_time = time.time() - start_time
@@ -793,8 +809,8 @@ async def service_query_knowledge_stream(request: QueryRequest) -> AsyncGenerato
             'error_type': type(e).__name__
         }
 
-async def _generate_streaming_response(vector_results: List, query: str, user_ctx: Dict) -> AsyncGenerator[str, None]:
-    """生成流式LLM响应 - 使用阿里云API的流式接口"""
+async def _generate_streaming_response(vector_results: List, query: str, user_ctx: Dict, chat_history=None) -> AsyncGenerator[str, None]:
+    """生成流式LLM响应 - 使用阿里云API的流式接口（dev-mix：支持对话历史）"""
     try:
         agent = get_hr_agent()
         if not agent.llm:
@@ -806,12 +822,39 @@ async def _generate_streaming_response(vector_results: List, query: str, user_ct
             # 基于文档的回答 - 不在开头添加来源标识
             # 因为回答中的【文档依据】部分已经说明了来源
             context_docs = agent._format_context_documents(vector_results)
-            prompt = agent._build_enhanced_prompt(query, context_docs, user_ctx)
+            
+            # dev-mix新增：构建包含历史的提示词
+            if chat_history and len(chat_history.messages) > 0:
+                prompt = agent._build_enhanced_prompt_with_history(
+                    query, context_docs, user_ctx, chat_history.messages
+                )
+                logger.info(f"使用对话历史构建提示词，历史消息数: {len(chat_history.messages)}")
+            else:
+                prompt = agent._build_enhanced_prompt(query, context_docs, user_ctx)
         else:
             # 通用知识回答 - 先输出来源标识
             yield "💡 **信息来源：AI通用知识（非公司文档）**\n\n"
             
-            prompt = f"""你是一个专业的人事知识库助手。用户问题：{query}
+            # dev-mix新增：通用知识回答也支持历史
+            if chat_history and len(chat_history.messages) > 0:
+                history_text = "\n".join([
+                    f"{'用户' if i % 2 == 0 else 'AI'}: {msg.content}"
+                    for i, msg in enumerate(chat_history.messages[-4:])  # 最近2轮对话
+                ])
+                
+                prompt = f"""你是一个专业的人事知识库助手。
+
+对话历史：
+{history_text}
+
+当前问题：{query}
+
+请基于你的通用知识回答这个问题。如果这个问题与人事管理相关，请提供专业的建议。
+如果问题超出人事领域，请礼貌地说明你主要负责人事相关问题。
+
+注意：不要在回答中重复添加"信息来源"标识，因为已经在前面添加过了。"""
+            else:
+                prompt = f"""你是一个专业的人事知识库助手。用户问题：{query}
 
 请基于你的通用知识回答这个问题。如果这个问题与人事管理相关，请提供专业的建议。
 如果问题超出人事领域，请礼貌地说明你主要负责人事相关问题。

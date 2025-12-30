@@ -107,6 +107,72 @@ class HRKnowledgeAgent:
         
         return prompt
     
+    def _build_enhanced_prompt_with_history(
+        self, 
+        question: str, 
+        context_docs: str, 
+        user_ctx: Dict,
+        chat_history: list
+    ) -> str:
+        """构建包含对话历史的增强提示词（dev-mix新增）"""
+        user_role = user_ctx.get('user_role', 'hr_staff')
+        department = user_ctx.get('department', 'HR')
+        
+        # 根据用户角色调整回答风格
+        role_context = {
+            'hr_staff': '作为人事专员，请提供详细的操作指导',
+            'hr_manager': '作为人事经理，请提供管理层面的建议',
+            'hr_director': '作为人事总监，请提供战略层面的分析',
+            'employee': '作为员工，请提供易懂的政策解释'
+        }.get(user_role, '请提供专业的人事指导')
+        
+        # 格式化对话历史
+        history_text = ""
+        if chat_history:
+            history_lines = []
+            for msg in chat_history[-4:]:  # 最近2轮对话
+                if hasattr(msg, 'type'):
+                    role = "用户" if msg.type == "human" else "AI助手"
+                    content = msg.content[:200]  # 限制长度
+                    history_lines.append(f"{role}: {content}")
+            history_text = "\n".join(history_lines)
+        
+        # 使用加载的系统提示词作为基础
+        prompt = f"""{self.system_prompt}
+
+---
+
+## 对话历史
+
+{history_text if history_text else "（这是新对话的开始）"}
+
+---
+
+## 当前任务
+
+用户角色：{user_role}
+角色要求：{role_context}
+
+用户问题：{question}
+
+相关文档：
+{context_docs}
+
+## 回答要求
+
+请严格按照上述系统提示词中的"回答格式模板"进行回答，确保：
+1. 结合对话历史理解用户意图
+2. 【文档依据】部分列出引用的文档
+3. 基于文档内容详细回答
+4. 提供操作步骤和注意事项
+5. 在回答末尾添加"📌 参考文档"列表
+
+**重要：不要在回答开头添加"信息来源"标识，因为【文档依据】部分已经说明了来源。**
+
+请开始回答："""
+        
+        return prompt
+    
     def _generate_fallback_response(self, vector_results: List, question: str) -> str:
         """生成降级响应"""
         if not vector_results:
