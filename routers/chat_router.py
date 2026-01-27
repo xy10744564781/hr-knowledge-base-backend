@@ -4,7 +4,22 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from database import get_db
+from typing import Optional
+from routers.auth_router import get_current_user
+from database import get_db, User
+
+def check_session_permission(session_data, current_user: Optional[User]):
+    """检查用户是否有权限访问会话"""
+    # 处理字典类型的session_data
+    if isinstance(session_data, dict):
+        session_user_id = session_data.get('user_id')
+    else:
+        # 处理对象类型的session_data
+        session_user_id = getattr(session_data, 'user_id', None)
+    
+    # 认证用户只能访问自己的会话
+    if session_user_id and session_user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="无权限访问此会话")
 from chat_service import (
     create_chat_session,
     get_chat_sessions,
@@ -57,11 +72,15 @@ class SessionResponse(BaseModel):
 @router.post("/chat-sessions", response_model=dict)
 async def create_session(
     request: CreateSessionRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """创建新的聊天会话"""
     try:
-        session = create_chat_session(db, request.title, request.user_id)
+        # 使用认证用户的ID
+        user_id = str(current_user.id)
+        
+        session = create_chat_session(db, request.title, user_id)
         return {
             "status": "success",
             "session": session.to_dict()
@@ -72,12 +91,32 @@ async def create_session(
 
 @router.get("/chat-sessions", response_model=dict)
 async def list_sessions(
-    user_id: Optional[str] = None,
     limit: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 改为强制认证
 ):
     """获取聊天会话列表"""
+    from logging_setup import logger
+    from fastapi import Request
+    
     try:
+        # 添加详细的调试日志
+        logger.info("=" * 60)
+        logger.info("[DEBUG] list_sessions 被调用")
+        logger.info(f"[DEBUG] current_user 对象: {current_user}")
+        logger.info(f"[DEBUG] current_user 类型: {type(current_user)}")
+        
+        if current_user:
+            logger.info(f"[DEBUG] ✅ 用户已认证")
+            logger.info(f"[DEBUG] - user.id: {current_user.id}")
+            logger.info(f"[DEBUG] - user.username: {current_user.username}")
+            logger.info(f"[DEBUG] - user.email: {current_user.email}")
+        
+        # 只返回当前用户的会话
+        user_id = str(current_user.id)
+        logger.info(f"[DEBUG] 查询参数 user_id: {user_id}")
+        logger.info("=" * 60)
+        
         sessions = get_chat_sessions(db, user_id, limit)
         return {
             "status": "success",
@@ -85,19 +124,24 @@ async def list_sessions(
             "count": len(sessions)
         }
     except Exception as e:
+        logger.error(f"[ERROR] 获取会话列表失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取会话列表失败: {str(e)}")
 
 
 @router.get("/chat-sessions/{session_id}", response_model=dict)
 async def get_session(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """获取单个聊天会话"""
     try:
         session = get_chat_session(db, session_id)
         if not session:
             raise HTTPException(status_code=404, detail="会话不存在")
+        
+        # 检查权限
+        check_session_permission(session, current_user)
         
         return {
             "status": "success",
@@ -113,15 +157,24 @@ async def get_session(
 async def add_message(
     session_id: str,
     request: AddMessageRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """添加聊天消息"""
     try:
+        # 检查会话权限
+        session = get_chat_session(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        check_session_permission(session, current_user)
+        
         message = add_chat_message(db, session_id, request.role, request.content)
         return {
             "status": "success",
             "message": message.to_dict()
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"添加消息失败: {str(e)}")
 
@@ -130,10 +183,17 @@ async def add_message(
 async def update_title(
     session_id: str,
     request: UpdateTitleRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """更新聊天会话标题"""
     try:
+        # 检查会话权限
+        session = get_chat_session(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        check_session_permission(session, current_user)
+        
         success = update_chat_session_title(db, session_id, request.title)
         if not success:
             raise HTTPException(status_code=404, detail="会话不存在")
@@ -151,10 +211,17 @@ async def update_title(
 @router.delete("/chat-sessions/{session_id}", response_model=dict)
 async def delete_session(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """删除聊天会话"""
     try:
+        # 检查会话权限
+        session = get_chat_session(db, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        check_session_permission(session, current_user)
+        
         success = delete_chat_session(db, session_id)
         if not success:
             raise HTTPException(status_code=404, detail="会话不存在")
@@ -172,14 +239,18 @@ async def delete_session(
 @router.post("/chat-sessions/{session_id}/generate-title", response_model=dict)
 async def generate_title(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """根据第一条用户消息自动生成会话标题"""
     try:
-        # 检查会话是否存在
+        # 检查会话是否存在并验证权限
         session = get_chat_session(db, session_id)
         if not session:
             raise HTTPException(status_code=404, detail="会话不存在")
+        
+        # 检查权限
+        check_session_permission(session, current_user)
         
         # 获取第一条用户消息
         first_message = get_first_user_message(db, session_id)
@@ -207,7 +278,8 @@ async def generate_title(
 @router.get("/chat-sessions/{session_id}/export")
 async def export_session(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # 强制认证
 ):
     """导出聊天会话为 Markdown 格式"""
     from logging_setup import logger
@@ -216,11 +288,14 @@ async def export_session(
     try:
         logger.info(f"开始导出会话: {session_id}")
         
-        # 获取会话信息
+        # 获取会话信息并检查权限
         session = get_chat_session(db, session_id)
         if not session:
             logger.error(f"会话不存在: {session_id}")
             raise HTTPException(status_code=404, detail="会话不存在")
+        
+        # 检查权限
+        check_session_permission(session, current_user)
         
         logger.info(f"会话信息获取成功: {session['title']}, 消息数量: {len(session['messages'])}")
         

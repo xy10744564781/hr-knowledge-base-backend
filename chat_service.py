@@ -11,7 +11,7 @@ def create_chat_session(db: Session, title: str, user_id: Optional[str] = None) 
     """创建新的聊天会话"""
     session = ChatSession(
         title=title,
-        user_id=user_id or "default_user"  # 暂时使用默认用户
+        user_id=user_id  # 允许None值用于匿名用户
     )
     db.add(session)
     db.commit()
@@ -23,12 +23,12 @@ def get_chat_sessions(db: Session, user_id: Optional[str] = None, limit: int = 5
     """获取聊天会话列表"""
     query = db.query(ChatSession)
     
-    # 如果指定了用户ID，则过滤
+    # 根据用户ID过滤会话
     if user_id:
         query = query.filter(ChatSession.user_id == user_id)
     else:
-        # 暂时获取所有会话
-        pass
+        # 匿名用户只能看到没有关联用户的会话
+        query = query.filter(ChatSession.user_id.is_(None))
     
     sessions = query.order_by(ChatSession.updated_at.desc()).limit(limit).all()
     
@@ -38,6 +38,7 @@ def get_chat_sessions(db: Session, user_id: Optional[str] = None, limit: int = 5
         messages = get_chat_messages(db, session.id)
         result.append({
             "id": session.id,
+            "user_id": session.user_id,  # 添加user_id字段
             "title": session.title,
             "messages": messages,
             "created_at": session.created_at.isoformat() if session.created_at else None,
@@ -58,6 +59,7 @@ def get_chat_session(db: Session, session_id: str) -> Optional[Dict]:
     
     return {
         "id": session.id,
+        "user_id": session.user_id,  # 添加user_id字段
         "title": session.title,
         "messages": messages,
         "created_at": session.created_at.isoformat() if session.created_at else None,

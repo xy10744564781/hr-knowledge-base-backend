@@ -1,22 +1,30 @@
-from fastapi import APIRouter, Query, Body
+from fastapi import APIRouter, Query, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 import json
 import asyncio
 from schemas import QueryRequest, QueryResponse, UserContext
 from services import service_query_knowledge, service_query_knowledge_stream
+from routers.auth_router import get_current_user, get_current_user_optional
+from database import User
+from user_service import user_service
 
 router = APIRouter()
 
 @router.post("/query-stream")
-async def query_knowledge_stream(request: QueryRequest):
+async def query_knowledge_stream(
+    request: QueryRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional)
+):
     """
-    人事知识查询 - 流式响应版本
+    企业知识查询 - 流式响应版本
     
     实时流式返回AI生成的回答，提供更好的用户体验
+    支持基于用户权限的多部门知识库检索
     
     - **question**: 用户的查询问题
-    - **user_ctx**: 用户上下文信息（部门、角色等）
+    - **session_id**: 会话ID（支持对话历史）
+    - **selected_folders**: 可选，用户选择的检索范围
     
     返回Server-Sent Events (SSE)格式的流式数据
     """
@@ -24,6 +32,43 @@ async def query_knowledge_stream(request: QueryRequest):
         try:
             # 发送开始事件
             yield f"data: {json.dumps({'type': 'start', 'message': '开始处理查询...'}, ensure_ascii=False)}\n\n"
+            
+            # 获取用户上下文
+            if current_user:
+                user_context = user_service.get_user_context(current_user.id)
+                # 安全获取部门名称，避免懒加载错误
+                try:
+                    department_name = current_user.department.name if current_user.department else "人事"
+                except Exception as e:
+                    logger.warning(f"获取用户部门信息失败: {e}")
+                    department_name = "人事"  # 默认部门
+                
+                # 更新请求中的用户上下文
+                # 获取用户角色代码（兼容RBAC模式）
+                user_role_code = current_user.role_obj.code if current_user.role_obj else "employee"
+                
+                request.user_ctx = UserContext(
+                    user_id=str(current_user.id),
+                    user_role=user_role_code,
+                    department=department_name
+                )
+            else:
+                # 匿名用户，只能访问公共文件夹
+                user_context = {
+                    "user_id": "anonymous",
+                    "department": "公共",
+                    "role": "employee",
+                    "accessible_folders": ["公共"],
+                    "can_upload": False
+                }
+                request.user_ctx = UserContext(
+                    user_id="anonymous",
+                    user_role="employee",
+                    department="公共"
+                )
+            
+            # 发送用户权限信息
+            yield f"data: {json.dumps({'type': 'user_context', 'data': user_context}, ensure_ascii=False)}\n\n"
             
             # 异步生成流式响应
             async for chunk in service_query_knowledge_stream(request):
@@ -51,42 +96,69 @@ async def query_knowledge_stream(request: QueryRequest):
     )
 
 @router.post("/query", response_model=QueryResponse)
-async def query_knowledge(request: QueryRequest) -> QueryResponse:
+async def query_knowledge(
+    request: QueryRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional)
+) -> QueryResponse:
     """
-    人事知识查询 - 完整版本
+    企业知识查询 - 完整版本
     
-    基于向量搜索和本地大模型，提供智能的人事政策和流程查询服务
+    基于向量搜索和大模型API，提供智能的企业知识查询服务
+    支持多部门权限控制和智能路由
     
     - **question**: 用户的查询问题
-    - **user_ctx**: 用户上下文信息（部门、角色等）
+    - **selected_folders**: 可选，用户选择的检索范围
     
     返回AI生成的回答、参考来源和置信度
     """
+    # 获取用户上下文
+    if current_user:
+        # 获取用户角色代码（兼容RBAC模式）
+        user_role_code = current_user.role_obj.code if current_user.role_obj else "employee"
+        
+        request.user_ctx = UserContext(
+            user_id=str(current_user.id),
+            user_role=user_role_code,
+            department=current_user.department.name
+        )
+    else:
+        # 匿名用户
+        request.user_ctx = UserContext(
+            user_id="anonymous",
+            user_role="employee",
+            department="公共"
+        )
+    
     return service_query_knowledge(request)
 
 @router.get("/query")
 async def query_knowledge_simple(
     question: str = Query(..., description="查询问题"),
-    user_role: str = Query("employee", description="用户角色"),
-    department: str = Query("HR", description="用户部门"),
-    user_id: Optional[str] = Query(None, description="用户ID")
+    current_user: Optional[User] = Depends(get_current_user_optional)
 ) -> QueryResponse:
     """
-    人事知识查询 - 简化版本
+    企业知识查询 - 简化版本
     
     通过URL参数进行简单查询，适用于快速集成
     
     - **question**: 查询问题
-    - **user_role**: 用户角色（employee, hr_staff, hr_manager, hr_director）
-    - **department**: 用户部门（默认HR）
-    - **user_id**: 可选的用户ID
     """
     # 构建用户上下文
-    user_ctx = UserContext(
-        user_id=user_id or f"guest_{hash(question) % 10000}",
-        user_role=user_role,
-        department=department
-    )
+    if current_user:
+        # 获取用户角色代码（兼容RBAC模式）
+        user_role_code = current_user.role_obj.code if current_user.role_obj else "employee"
+        
+        user_ctx = UserContext(
+            user_id=str(current_user.id),
+            user_role=user_role_code,
+            department=current_user.department.name
+        )
+    else:
+        user_ctx = UserContext(
+            user_id="anonymous",
+            user_role="employee",
+            department="公共"
+        )
     
     # 构建查询请求
     request = QueryRequest(
@@ -96,18 +168,26 @@ async def query_knowledge_simple(
     
     return service_query_knowledge(request)
 
+@router.get("/accessible-folders")
+async def get_accessible_folders(current_user: User = Depends(get_current_user)):
+    """获取用户可访问的文件夹列表"""
+    return {
+        "folders": current_user.get_accessible_folders(),
+        "can_upload": current_user.can_upload(),
+        "user_department": current_user.department.name
+    }
+
 @router.post("/batch-query")
 async def batch_query_knowledge(
     questions: List[str] = Body(..., description="批量查询问题列表"),
-    user_ctx: UserContext = Body(..., description="用户上下文")
+    current_user: Optional[User] = Depends(get_current_user_optional)
 ) -> dict:
     """
-    批量人事知识查询
+    批量企业知识查询
     
     一次性处理多个查询问题，提高效率
     
     - **questions**: 查询问题列表（最多10个）
-    - **user_ctx**: 用户上下文信息
     """
     if len(questions) > 10:
         return {
@@ -115,6 +195,23 @@ async def batch_query_knowledge(
             "message": "批量查询最多支持10个问题",
             "results": []
         }
+    
+    # 构建用户上下文
+    if current_user:
+        # 获取用户角色代码（兼容RBAC模式）
+        user_role_code = current_user.role_obj.code if current_user.role_obj else "employee"
+        
+        user_ctx = UserContext(
+            user_id=str(current_user.id),
+            user_role=user_role_code,
+            department=current_user.department.name
+        )
+    else:
+        user_ctx = UserContext(
+            user_id="anonymous",
+            user_role="employee",
+            department="公共"
+        )
     
     results = []
     for i, question in enumerate(questions):
@@ -143,70 +240,81 @@ async def batch_query_knowledge(
 
 @router.get("/query-suggestions")
 async def get_query_suggestions(
-    category: Optional[str] = Query(None, description="查询分类")
+    category: Optional[str] = Query(None, description="查询分类"),
+    current_user: Optional[User] = Depends(get_current_user_optional)
 ) -> dict:
     """
     获取查询建议
     
-    提供常见的人事查询问题建议
+    根据用户部门提供相关的查询问题建议
     
     - **category**: 可选的查询分类过滤
     """
-    # 常见查询建议
-    suggestions = {
-        "salary": [
+    # 部门相关查询建议
+    department_suggestions = {
+        "人事": [
             "薪资什么时候发放？",
-            "薪资构成包括哪些部分？",
-            "如何申请薪资调整？",
-            "年终奖发放标准是什么？"
-        ],
-        "leave": [
             "年假如何申请？",
-            "病假需要什么手续？",
-            "事假申请流程是什么？",
-            "产假政策是怎样的？"
-        ],
-        "attendance": [
             "考勤制度是什么？",
-            "迟到早退如何处理？",
-            "加班费如何计算？",
-            "打卡时间要求是什么？"
+            "新员工入职流程？"
         ],
-        "onboarding": [
-            "新员工入职需要准备什么材料？",
-            "入职培训安排是怎样的？",
-            "试用期政策是什么？",
-            "入职手续办理流程？"
+        "质量": [
+            "质量管理体系是什么？",
+            "产品检测标准？",
+            "质量认证流程？",
+            "不合格品处理流程？"
         ],
-        "benefits": [
-            "员工福利有哪些？",
-            "社保缴费标准是什么？",
-            "公积金政策是怎样的？",
-            "员工体检安排？"
+        "技术": [
+            "开发规范是什么？",
+            "代码审查流程？",
+            "技术文档模板？",
+            "系统部署流程？"
         ],
-        "training": [
-            "培训计划是什么？",
-            "如何申请培训？",
-            "培训证书如何获得？",
-            "职业发展路径？"
+        "财务": [
+            "报销流程是什么？",
+            "预算申请流程？",
+            "发票管理规定？",
+            "成本核算方法？"
+        ],
+        "销售": [
+            "销售流程是什么？",
+            "客户管理规定？",
+            "合同审批流程？",
+            "销售目标制定？"
+        ],
+        "运营": [
+            "运营流程优化？",
+            "数据分析方法？",
+            "项目管理流程？",
+            "绩效考核标准？"
         ]
     }
     
-    if category and category in suggestions:
+    # 公共查询建议
+    public_suggestions = [
+        "公司组织架构？",
+        "员工手册内容？",
+        "公司文化价值观？",
+        "办公设施使用规定？"
+    ]
+    
+    if current_user:
+        user_dept = current_user.department.name
+        dept_suggestions = department_suggestions.get(user_dept, [])
+        all_suggestions = dept_suggestions + public_suggestions
+    else:
+        all_suggestions = public_suggestions
+    
+    if category and category in department_suggestions:
         return {
             "status": "success",
             "category": category,
-            "suggestions": suggestions[category]
+            "suggestions": department_suggestions[category]
         }
-    
-    # 返回所有建议
-    all_suggestions = []
-    for cat, items in suggestions.items():
-        all_suggestions.extend(items[:2])  # 每个分类取前2个
     
     return {
         "status": "success",
         "category": "all",
-        "suggestions": all_suggestions,
-        "categories": list(suggestions.keys())
+        "suggestions": all_suggestions[:8],  # 返回前8个建议
+        "departments": list(department_suggestions.keys())
     }

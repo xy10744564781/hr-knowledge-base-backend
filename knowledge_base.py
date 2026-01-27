@@ -5,6 +5,7 @@ from typing import List, Tuple, Optional
 from fastapi import UploadFile, HTTPException
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, UnstructuredPDFLoader
 from langchain_chroma import Chroma
+from langchain.schema import Document
 from logging_setup import logger
 from config import (
     MAX_FILE_SIZE, SUPPORTED_FORMATS, CHROMA_DB_PATH, CHROMA_COLLECTION_NAME,
@@ -12,6 +13,245 @@ from config import (
 )
 from document_splitter import create_hr_splitter
 from dashscope_embeddings import DashScopeEmbeddings
+
+
+class ExcelLoader:
+    """Excel 文件加载器 - 优化版"""
+    
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+    
+    def load(self) -> List[Document]:
+        """加载 Excel 文件并转换为 Document 对象"""
+        try:
+            import pandas as pd
+            import numpy as np
+            
+            # 读取 Excel 文件的所有 sheet
+            excel_file = pd.ExcelFile(self.file_path)
+            documents = []
+            
+            for sheet_name in excel_file.sheet_names:
+                # 读取每个 sheet
+                df = pd.read_excel(self.file_path, sheet_name=sheet_name)
+                
+                # 跳过空 sheet
+                if df.empty:
+                    continue
+                
+                # 构建结构化内容
+                content_parts = []
+                
+                # === 表格开始标记 ===
+                content_parts.append(f"=== Excel 表格：{sheet_name} ===\n\n")
+                
+                # 列名信息
+                columns = [str(col) for col in df.columns]
+                content_parts.append(f"【列名】\n{', '.join(columns)}\n\n")
+                
+                # 数据统计信息（方案2）
+                content_parts.append(f"【数据概览】\n")
+                content_parts.append(f"总行数: {len(df)}\n")
+                content_parts.append(f"总列数: {len(df.columns)}\n")
+                
+                # 为数值列添加统计信息
+                numeric_cols = df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) > 0:
+                    content_parts.append(f"\n数值列统计:\n")
+                    for col in numeric_cols:
+                        if df[col].notna().sum() > 0:  # 有非空值
+                            content_parts.append(
+                                f"  • {col}: "
+                                f"最小值={df[col].min():.2f}, "
+                                f"最大值={df[col].max():.2f}, "
+                                f"平均值={df[col].mean():.2f}\n"
+                            )
+                
+                # 为分类列添加分布信息
+                categorical_cols = df.select_dtypes(include=['object']).columns
+                if len(categorical_cols) > 0:
+                    content_parts.append(f"\n分类列分布:\n")
+                    for col in categorical_cols:
+                        if df[col].notna().sum() > 0:
+                            value_counts = df[col].value_counts()
+                            if len(value_counts) <= 10:  # 只显示不超过10个类别
+                                dist = ", ".join([f"{k}({v})" for k, v in value_counts.items()])
+                                content_parts.append(f"  • {col}: {dist}\n")
+                
+                content_parts.append(f"\n【详细数据】\n")
+                
+                # 逐行添加数据（方案1优化）
+                for idx, row in df.iterrows():
+                    row_text = " | ".join(
+                        f"{col}: {val}" 
+                        for col, val in row.items() 
+                        if pd.notna(val)
+                    )
+                    if row_text:  # 只添加非空行
+                        content_parts.append(f"第{idx+1}行: {row_text}\n")
+                
+                # === 表格结束标记 ===
+                content_parts.append(f"\n=== 表格结束 ===\n")
+                
+                content = "".join(content_parts)
+                
+                # 创建 Document 对象，包含丰富的 metadata
+                doc = Document(
+                    page_content=content,
+                    metadata={
+                        "source": self.file_path,
+                        "sheet_name": sheet_name,
+                        "row_count": len(df),
+                        "column_count": len(df.columns),
+                        "columns": columns,
+                        "has_numeric_data": len(numeric_cols) > 0,
+                        "numeric_columns": list(numeric_cols) if len(numeric_cols) > 0 else []
+                    }
+                )
+                documents.append(doc)
+            
+            if not documents:
+                # 如果没有有效的 sheet，创建一个空文档
+                logger.warning(f"Excel 文件 {self.file_path} 没有有效数据")
+                documents.append(Document(
+                    page_content="此 Excel 文件为空或无法读取有效数据",
+                    metadata={"source": self.file_path}
+                ))
+            
+            return documents
+            
+        except ImportError:
+            raise ImportError("需要安装 pandas 和 openpyxl 库来处理 Excel 文件。请运行: pip install pandas openpyxl")
+        except Exception as e:
+            logger.error(f"加载 Excel 文件失败: {str(e)}")
+            raise ValueError(f"Excel 文件处理失败: {str(e)}")
+
+
+class DocxTableLoader:
+    """Word 文档加载器 - 支持表格提取"""
+    
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+    
+    def load(self) -> List[Document]:
+        """加载 Word 文档，提取文本和表格"""
+        try:
+            from docx import Document as DocxDocument
+            
+            doc = DocxDocument(self.file_path)
+            documents = []
+            
+            # 用于存储文档内容的各个部分
+            content_parts = []
+            table_count = 0
+            
+            # 遍历文档的所有元素（段落和表格）
+            for element in doc.element.body:
+                # 处理段落
+                if element.tag.endswith('p'):
+                    # 找到对应的段落对象
+                    for para in doc.paragraphs:
+                        if para._element == element:
+                            text = para.text.strip()
+                            if text:
+                                content_parts.append(text + "\n\n")
+                            break
+                
+                # 处理表格
+                elif element.tag.endswith('tbl'):
+                    # 找到对应的表格对象
+                    for table in doc.tables:
+                        if table._element == element:
+                            table_count += 1
+                            table_text = self._extract_table(table, table_count)
+                            if table_text:
+                                content_parts.append(table_text)
+                            break
+            
+            # 如果没有内容，使用备用方法（纯文本提取）
+            if not content_parts:
+                logger.warning(f"Word文档 {self.file_path} 使用备用方法提取")
+                all_text = "\n\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+                if all_text:
+                    content_parts.append(all_text)
+            
+            # 合并所有内容
+            full_content = "".join(content_parts)
+            
+            if not full_content.strip():
+                logger.warning(f"Word文档 {self.file_path} 没有有效内容")
+                full_content = "此 Word 文档为空或无法读取有效内容"
+            
+            # 创建 Document 对象
+            doc_obj = Document(
+                page_content=full_content,
+                metadata={
+                    "source": self.file_path,
+                    "table_count": table_count,
+                    "has_tables": table_count > 0
+                }
+            )
+            documents.append(doc_obj)
+            
+            return documents
+            
+        except ImportError:
+            raise ImportError("需要安装 python-docx 库来处理 Word 文件。请运行: pip install python-docx")
+        except Exception as e:
+            logger.error(f"加载 Word 文件失败: {str(e)}")
+            raise ValueError(f"Word 文件处理失败: {str(e)}")
+    
+    def _extract_table(self, table, table_number: int) -> str:
+        """提取表格内容并格式化"""
+        try:
+            content_parts = []
+            
+            # === 表格开始标记 ===
+            content_parts.append(f"\n=== Word 表格 {table_number} ===\n\n")
+            
+            # 提取表头（第一行）
+            if len(table.rows) > 0:
+                headers = []
+                for cell in table.rows[0].cells:
+                    header_text = cell.text.strip()
+                    if header_text:
+                        headers.append(header_text)
+                
+                if headers:
+                    content_parts.append(f"【列名】\n{' | '.join(headers)}\n\n")
+                    content_parts.append(f"【表格数据】\n")
+                    
+                    # 提取数据行（从第二行开始）
+                    for row_idx, row in enumerate(table.rows[1:], start=1):
+                        row_data = []
+                        for cell_idx, cell in enumerate(row.cells):
+                            cell_text = cell.text.strip()
+                            if cell_text:
+                                # 如果有表头，使用表头名称
+                                if cell_idx < len(headers):
+                                    row_data.append(f"{headers[cell_idx]}: {cell_text}")
+                                else:
+                                    row_data.append(cell_text)
+                        
+                        if row_data:
+                            content_parts.append(f"第{row_idx}行: {' | '.join(row_data)}\n")
+                else:
+                    # 没有明确表头，直接输出所有行
+                    content_parts.append(f"【表格数据】\n")
+                    for row_idx, row in enumerate(table.rows, start=1):
+                        row_data = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if row_data:
+                            content_parts.append(f"第{row_idx}行: {' | '.join(row_data)}\n")
+            
+            # === 表格结束标记 ===
+            content_parts.append(f"\n=== 表格结束 ===\n\n")
+            
+            return "".join(content_parts)
+            
+        except Exception as e:
+            logger.error(f"提取表格失败: {str(e)}")
+            return f"\n[表格 {table_number} 提取失败]\n\n"
+
 
 # 全局向量存储实例
 vector_store = None
@@ -412,7 +652,11 @@ def create_document_loader(temp_path: str, file_ext: str, filename: str):
                     continue
             raise ValueError(f"无法使用任何编码读取文件: {filename}")
         elif file_ext in ['docx', 'doc']:
-            return Docx2txtLoader(temp_path)
+            # 使用支持表格提取的 DocxTableLoader
+            return DocxTableLoader(temp_path)
+        elif file_ext in ['xlsx', 'xls']:
+            # Excel 文件处理
+            return ExcelLoader(temp_path)
         else:
             raise ValueError(f'不支持的文档格式: {file_ext}')
     except Exception as e:

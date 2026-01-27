@@ -3,25 +3,20 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 
-class UserRole(str, Enum):
-    """用户角色枚举"""
-    HR_STAFF = "hr_staff"
-    HR_MANAGER = "hr_manager"
-    HR_DIRECTOR = "hr_director"
-    EMPLOYEE = "employee"
-
 class Department(str, Enum):
     """部门枚举"""
-    HR = "HR"
-    IT = "IT"
-    FINANCE = "Finance"
-    MARKETING = "Marketing"
-    OPERATIONS = "Operations"
+    HR = "人事"
+    QUALITY = "质量"
+    TECH = "技术"
+    FINANCE = "财务"
+    SALES = "销售"
+    OPERATIONS = "运营"
+    PUBLIC = "公共"  # 匿名用户和公共访问
 
 class UserContext(BaseModel):
     """简化的用户上下文，专为人事部门设计"""
     department: Department = Department.HR
-    user_role: UserRole = UserRole.HR_STAFF
+    user_role: str = "employee"  # 改为字符串类型，从数据库动态获取角色
     user_id: Optional[str] = None
     
     class Config:
@@ -68,6 +63,7 @@ class DocumentInfo(BaseModel):
     upload_time: datetime
     uploader: str
     chunks_count: int
+    department: Optional[str] = None
     description: Optional[str] = None
 
 class QueryResponse(BaseModel):

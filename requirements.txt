@@ -13,19 +13,19 @@ sqlalchemy==2.0.23
 # Vector database
 chromadb==0.5.3
 
-# LangChain core components (Python 3.11兼容版本)
-langchain-core==0.2.38
-langchain-community==0.2.16
-langchain-chroma==0.1.2
-langchain-openai==0.1.23  # 用于调用阿里云百炼（OpenAI兼容接口）
+# LangChain core components (简化版本)
+langchain-openai==0.1.8
 
 # Data validation
 pydantic==2.8.2
+email-validator==2.1.0  # 邮箱验证
 
 # Document processing
 python-docx==1.1.2
 docx2txt==0.8
 unstructured==0.15.7
+pandas==2.1.4  # Excel 文件处理
+openpyxl==3.1.2  # Excel 文件读写支持
 
 # Text processing
 tiktoken==0.7.0
@@ -40,3 +40,7 @@ requests==2.31.0
 
 # BM25 and advanced retrieval (for dev-mix branch)
 rank-bm25==0.2.2  # BM25算法实现
+
+# Authentication and security
+PyJWT==2.8.0  # JWT token处理
+python-multipart==0.0.6  # 表单数据处理

@@ -1,10 +1,12 @@
-from fastapi import APIRouter, UploadFile, File, Form, Query, Path
+from fastapi import APIRouter, UploadFile, File, Form, Query, Path, Depends
 from typing import List, Optional
 from services import (
     service_upload_document, service_delete_document, service_update_document,
     service_list_documents, service_search_documents
 )
 from schemas import DocumentUploadResponse, DocumentInfo
+from routers.auth_router import get_current_user
+from database import User
 
 router = APIRouter()
 
@@ -14,7 +16,8 @@ async def upload_document(
     title: str = Form(..., description="文档标题"),
     category: str = Form(..., description="文档分类"),
     access_level: str = Form(..., description="访问权限"),
-    user_ctx: str = Form(..., description="用户上下文JSON字符串")
+    user_ctx: str = Form(..., description="用户上下文JSON字符串"),
+    current_user: User = Depends(get_current_user)  # 添加认证
 ) -> DocumentUploadResponse:
     """
     上传人事文档到知识库
@@ -29,7 +32,8 @@ async def upload_document(
 
 @router.get("/documents", response_model=List[DocumentInfo])
 async def list_documents(
-    limit: Optional[int] = Query(None, description="返回文档数量限制", ge=1, le=100)
+    limit: Optional[int] = Query(None, description="返回文档数量限制", ge=1, le=100),
+    current_user: User = Depends(get_current_user)  # 添加认证
 ) -> List[DocumentInfo]:
     """
     获取文档列表
@@ -83,7 +87,8 @@ async def update_document(
 
 @router.delete("/documents/{document_id}")
 async def delete_document(
-    document_id: str = Path(..., description="文档ID")
+    document_id: str = Path(..., description="文档ID"),
+    current_user: User = Depends(get_current_user)  # 添加认证
 ) -> dict:
     """
     删除指定文档

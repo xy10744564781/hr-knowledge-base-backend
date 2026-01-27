@@ -15,9 +15,9 @@ _env_file_exists = os.path.exists(_env_file_path)
 load_dotenv()
 
 # 应用配置
-APP_TITLE = '人事知识库系统'
-APP_DESCRIPTION = '基于大模型API的人事文档管理和智能查询系统'
-APP_VERSION = '2.0'
+APP_TITLE = '企业知识库系统'
+APP_DESCRIPTION = '基于大模型API的企业文档管理和智能查询系统'
+APP_VERSION = '3.0'
 
 # 日志配置
 LOG_FILE_NAME = f'./log/hr_kb_log_{datetime.now().strftime("%Y%m%d")}.log'
@@ -101,7 +101,10 @@ MAX_HISTORY_MESSAGES = 6  # 最多保留的历史消息数（3轮对话）
 
 # 文档处理配置
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-SUPPORTED_FORMATS = ['.pdf', '.docx', '.doc', '.txt', '.md']
+SUPPORTED_FORMATS = ['.pdf', '.docx', '.doc', '.txt', '.md', '.xlsx', '.xls']
+
+# 文档存储配置
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./files")  # 文档存储路径
 
 # 文档切割配置
 CHUNK_SIZE = 1200  # 增加chunk大小
